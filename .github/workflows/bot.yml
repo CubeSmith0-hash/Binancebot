@@ -1,8 +1,6 @@
 name: signal-bot
 
 on:
-  schedule:
-    - cron: "1-59/15 * * * *"
   workflow_dispatch:
 
 jobs:
