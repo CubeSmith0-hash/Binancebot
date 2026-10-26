@@ -107,6 +107,7 @@ def send(text):
                 json={"chat_id": CHAT_ID, "text": text},
                 timeout=15,
             )
+            print("telegram:", r.status_code, r.text[:200])
             if r.status_code == 429:
                 time.sleep(r.json().get("parameters", {}).get("retry_after", 3) + 1)
                 continue
