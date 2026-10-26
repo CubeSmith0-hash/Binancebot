@@ -1,5 +1,6 @@
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -11,29 +12,45 @@ INTERVAL = "15m"
 CANDLES = 8
 TZ = timezone(timedelta(hours=3))
 
-COINS = [
-    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK",
-    "DOT", "LTC", "BCH", "ATOM", "NEAR", "APT", "ARB", "OP", "SUI", "INJ",
-    "FIL", "ETC", "XLM", "HBAR", "ICP", "AAVE", "UNI", "RUNE", "ALGO", "SEI",
-    "TIA", "PEPE", "SHIB", "WLD", "FET", "RNDR", "IMX", "GALA", "SAND", "ROSE",
-]
+# 24 saatlik USDT hacmi bu değerin altındaki coinler taranmaz.
+# Hepsini taramak için 0 yap.
+MIN_VOLUME = 1_000_000
+
+STABLES = {
+    "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
+    "AEUR", "EUR", "EURI", "TRY", "GBP", "BRL", "RUB", "UAH", "XUSD",
+}
 
 HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
 
 
-def get_klines(symbol):
+def api_get(path, params=None):
     for host in HOSTS:
         try:
-            r = requests.get(
-                f"{host}/api/v3/klines",
-                params={"symbol": symbol, "interval": INTERVAL, "limit": CANDLES + 4},
-                timeout=15,
-            )
+            r = requests.get(host + path, params=params, timeout=20)
             if r.status_code == 200:
                 return r.json()
         except requests.RequestException:
             pass
     return None
+
+
+def get_symbols():
+    info = api_get("/api/v3/exchangeInfo")
+    if not info:
+        return []
+    syms = [
+        s["symbol"]
+        for s in info["symbols"]
+        if s["quoteAsset"] == "USDT"
+        and s["status"] == "TRADING"
+        and s["baseAsset"] not in STABLES
+    ]
+    if MIN_VOLUME > 0:
+        tick = api_get("/api/v3/ticker/24hr") or []
+        vols = {t["symbol"]: float(t["quoteVolume"]) for t in tick}
+        syms = [s for s in syms if vols.get(s, 0) >= MIN_VOLUME]
+    return syms
 
 
 def color(c):
@@ -46,59 +63,71 @@ def color(c):
 
 
 def check(symbol):
-    k = get_klines(symbol)
-    if not k:
-        return None
-    now_ms = int(time.time() * 1000)
-    closed = [c for c in k if int(c[6]) < now_ms]
-    if len(closed) < CANDLES + 1:
-        return None
-    last = closed[-CANDLES:]
-    prev = closed[-CANDLES - 1]
-    cols = [color(c) for c in last]
-    if all(x == "G" for x in cols):
-        side = "LONG"
-        if color(prev) == "G":
+    try:
+        k = api_get(
+            "/api/v3/klines",
+            {"symbol": symbol, "interval": INTERVAL, "limit": CANDLES + 4},
+        )
+        if not k:
             return None
-    elif all(x == "R" for x in cols):
-        side = "SHORT"
-        if color(prev) == "R":
+        now_ms = int(time.time() * 1000)
+        closed = [c for c in k if int(c[6]) < now_ms]
+        if len(closed) < CANDLES + 1:
             return None
-    else:
+        last = closed[-CANDLES:]
+        prev = closed[-CANDLES - 1]
+        cols = [color(c) for c in last]
+        if all(x == "G" for x in cols):
+            side = "LONG"
+            if color(prev) == "G":
+                return None
+        elif all(x == "R" for x in cols):
+            side = "SHORT"
+            if color(prev) == "R":
+                return None
+        else:
+            return None
+        close_ms = int(last[-1][6]) + 1
+        return symbol, side, float(last[-1][4]), close_ms
+    except Exception:
         return None
-    close_ms = int(last[-1][6]) + 1
-    return side, float(last[-1][4]), close_ms
 
 
 def fmt(p):
-    return f"{p:.6f}".rstrip("0").rstrip(".") if p < 1 else f"{p:.4f}".rstrip("0").rstrip(".")
+    if p < 1:
+        return f"{p:.8f}".rstrip("0").rstrip(".")
+    return f"{p:.4f}".rstrip("0").rstrip(".")
 
 
 def send(text):
-    requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": text},
-        timeout=15,
-    )
+    for _ in range(3):
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": text},
+                timeout=15,
+            )
+            if r.status_code == 429:
+                time.sleep(r.json().get("parameters", {}).get("retry_after", 3) + 1)
+                continue
+            return
+        except requests.RequestException:
+            time.sleep(2)
 
 
 def main():
-    for coin in COINS:
-        symbol = f"{coin}USDT"
-        res = check(symbol)
-        if not res:
-            continue
-        side, price, close_ms = res
+    symbols = get_symbols()
+    print(f"{len(symbols)} coin taranıyor")
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        results = [r for r in ex.map(check, symbols) if r]
+
+    for symbol, side, price, close_ms in results:
         t = datetime.fromtimestamp(close_ms / 1000, TZ).strftime("%H:%M")
         late = int((time.time() * 1000 - close_ms) / 60000)
         note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late >= 3 else ""
         icon = "🟢" if side == "LONG" else "🔴"
-        send(
-            f"{icon} {symbol} {side}\n"
-            f"Saat: {t}\n"
-            f"Fiyat: {fmt(price)}{note}"
-        )
-        time.sleep(0.3)
+        send(f"{icon} {symbol} {side}\nSaat: {t}\nFiyat: {fmt(price)}{note}")
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":
