@@ -14,7 +14,7 @@ TZ = timezone(timedelta(hours=3))
 
 # 24 saatlik USDT hacmi bu değerin altındaki coinler taranmaz.
 # Hepsini taramak için 0 yap.
-MIN_VOLUME = 0
+MIN_VOLUME = 50_000_000
 
 STABLES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
