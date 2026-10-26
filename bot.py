@@ -117,6 +117,7 @@ def send(text):
 
 def main():
     symbols = get_symbols()
+    send("✅ Test: bot çalışıyor")
     print(f"{len(symbols)} coin taranıyor")
     with ThreadPoolExecutor(max_workers=10) as ex:
         results = [r for r in ex.map(check, symbols) if r]
