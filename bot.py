@@ -20,6 +20,20 @@ STABLES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
     "AEUR", "EUR", "EURI", "TRY", "GBP", "BRL", "RUB", "UAH", "XUSD",
 }
+# Kripto olmayanlar (hisse tokenları, altın) taranmaz
+STOCKS = {
+    "AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "GOOG", "AMZN", "META",
+    "COIN", "MSTR", "CRCL", "HOOD", "SPY", "QQQ", "NFLX", "AMD",
+    "INTC", "BABA", "PLTR", "ORCL", "AVGO", "JPM", "V", "MA", "DIS",
+    "PYPL", "UBER", "SHOP", "SQ", "TSM", "NKE", "KO", "PEP", "WMT",
+}
+NON_CRYPTO = {"PAXG", "XAUT"}
+
+
+def is_excluded(base):
+    if base in NON_CRYPTO:
+        return True
+    return base.endswith("B") and base[:-1] in STOCKS
 
 HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
 
@@ -45,6 +59,7 @@ def get_symbols():
         if s["quoteAsset"] == "USDT"
         and s["status"] == "TRADING"
         and s["baseAsset"] not in STABLES
+        and not is_excluded(s["baseAsset"])
     ]
     if MIN_VOLUME > 0:
         tick = api_get("/api/v3/ticker/24hr") or []
