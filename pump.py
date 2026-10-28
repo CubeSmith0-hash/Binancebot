@@ -18,7 +18,17 @@ TZ = timezone(timedelta(hours=3))
 FAPI = "https://fapi.binance.com"
 SPOT = "https://data-api.binance.vision"
 
-STABLES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1"}
+STABLES = {
+    "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
+    "AEUR", "EUR", "EURI", "TRY", "GBP", "BRL", "RUB", "UAH", "XUSD",
+}
+STOCKS = {
+    "AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "GOOG", "AMZN", "META",
+    "COIN", "MSTR", "CRCL", "HOOD", "SPY", "QQQ", "NFLX", "AMD",
+    "INTC", "BABA", "PLTR", "ORCL", "AVGO", "JPM", "V", "MA", "DIS",
+    "PYPL", "UBER", "SHOP", "SQ", "TSM", "NKE", "KO", "PEP", "WMT",
+}
+NON_CRYPTO = {"PAXG", "XAUT"}
 BAD_TYPES = {"EQUITY", "COMMODITY", "INDEX"}
 
 BASE = FAPI
@@ -47,7 +57,10 @@ def keep(s):
         return False
     if "TradFi" in (s.get("underlyingSubType") or []):
         return False
-    return True
+    base = s.get("baseAsset", "")
+    if base in NON_CRYPTO or (base.endswith("B") and base[:-1] in STOCKS):
+        return False
+        return True
 
 
 def check(symbol):
