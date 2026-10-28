@@ -60,12 +60,12 @@ def get_symbols():
         and s["status"] == "TRADING"
         and s["baseAsset"] not in STABLES
         and not is_excluded(s["baseAsset"])
-      ] 
+        ] 
         if MIN_VOLUME > 0:
         tick = api_get("/api/v3/ticker/24hr") or []
         vols = {t["symbol"]: float(t["quoteVolume"]) for t in tick}
         syms = [s for s in syms if vols.get(s, 0) >= MIN_VOLUME]
-    return syms
+        return syms
 
 
 def color(c):
