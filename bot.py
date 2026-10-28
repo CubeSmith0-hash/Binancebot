@@ -14,7 +14,8 @@ TZ = timezone(timedelta(hours=3))
 
 # 24 saatlik USDT hacmi bu değerin altındaki coinler taranmaz.
 # Hepsini taramak için 0 yap.
-MIN_VOLUME = 1_000_000
+MIN_VOLUME = 1_000
+MAX_VOLUME = 50_000
 
 STABLES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
@@ -62,9 +63,9 @@ def get_symbols():
         and not is_excluded(s["baseAsset"])
     ]
     if MIN_VOLUME > 0:
-        tick = api_get("/api/v3/ticker/24hr") or []
-        vols = {t["symbol"]: float(t["quoteVolume"]) for t in tick}
-        syms = [s for s in syms if vols.get(s, 0) >= MIN_VOLUME]
+    tick = api_get("/api/v3/ticker/24hr") or []
+    vols = {t["symbol"]: float(t["quoteVolume"]) for t in tick}
+    syms = [s for s in syms if MIN_VOLUME <= vols.get(s, 0) <= MAX_VOLUME]
     return syms
 
 
