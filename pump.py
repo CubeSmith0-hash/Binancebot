@@ -1,0 +1,148 @@
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone, timedelta
+
+import requests
+
+TOKEN = os.environ["TELEGRAM_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+INTERVAL = "15m"
+LOOKBACK = 20        # ortalama hacim için önceki mum sayısı
+VOL_MULT = 5.0       # son mum hacmi ortalamanın en az kaç katı olmalı
+PRICE_PCT = 3.0      # son mumda en az % kaç artış (açılış -> kapanış)
+MIN_AVG_VOL = 200    # önceki mumların ortalama hacmi (USDT), bunun altı elenir
+TZ = timezone(timedelta(hours=3))
+
+FAPI = "https://fapi.binance.com"
+SPOT = "https://data-api.binance.vision"
+
+STABLES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1"}
+BAD_TYPES = {"EQUITY", "COMMODITY", "INDEX"}
+
+BASE = FAPI
+PREFIX = "/fapi/v1"
+
+
+def get(base, path, params=None):
+    try:
+        r = requests.get(base + path, params=params, timeout=20)
+        if r.status_code == 200:
+            return r.json()
+        print("HTTP", r.status_code, path)
+    except requests.RequestException as e:
+        print("hata", path, e)
+    return None
+
+
+def keep(s):
+    if s.get("quoteAsset") != "USDT" or s.get("status") != "TRADING":
+        return False
+    if s.get("contractType", "PERPETUAL") != "PERPETUAL":
+        return False
+    if s.get("baseAsset") in STABLES:
+        return False
+    if s.get("underlyingType") in BAD_TYPES:
+        return False
+    if "TradFi" in (s.get("underlyingSubType") or []):
+        return False
+    return True
+
+
+def check(symbol):
+    k = get(BASE, f"{PREFIX}/klines",
+            {"symbol": symbol, "interval": INTERVAL, "limit": LOOKBACK + 3})
+    if not k:
+        return None
+    now_ms = int(time.time() * 1000)
+    closed = [c for c in k if int(c[6]) < now_ms]
+    if len(closed) < LOOKBACK + 1:
+        return None
+    last = closed[-1]
+    prev = closed[-LOOKBACK - 1:-1]
+    o, cl = float(last[1]), float(last[4])
+    if o <= 0 or cl <= o:
+        return None
+    pct = (cl / o - 1) * 100
+    if pct < PRICE_PCT:
+        return None
+    avg = sum(float(c[7]) for c in prev) / len(prev)
+    if avg < MIN_AVG_VOL:
+        return None
+    mult = float(last[7]) / avg
+    if mult < VOL_MULT:
+        return None
+    return symbol, cl, pct, mult, int(last[6]) + 1
+
+
+def fmt(p):
+    if p < 1:
+        return f"{p:.8f}".rstrip("0").rstrip(".")
+    return f"{p:.4f}".rstrip("0").rstrip(".")
+
+
+def fmt_vol(v):
+    if v >= 1e6:
+        return f"{v / 1e6:.2f}M"
+    if v >= 1e3:
+        return f"{v / 1e3:.0f}K"
+    return f"{v:.0f}"
+
+
+def send(text):
+    for _ in range(3):
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": text},
+                timeout=15,
+            )
+            print("telegram:", r.status_code)
+            if r.status_code == 429:
+                time.sleep(r.json().get("parameters", {}).get("retry_after", 3) + 1)
+                continue
+            return
+        except requests.RequestException:
+            time.sleep(2)
+
+
+def main():
+    global BASE, PREFIX
+    mode = "futures"
+    info = get(FAPI, "/fapi/v1/exchangeInfo")
+    if not info:
+        print("fapi erişilemedi, spot'a geçiliyor")
+        BASE, PREFIX, mode = SPOT, "/api/v3", "spot"
+        info = get(SPOT, "/api/v3/exchangeInfo")
+    if not info:
+        print("Borsa verisi alınamadı")
+        return
+
+    symbols = [s["symbol"] for s in info["symbols"] if keep(s)]
+    print(f"[{mode}] {len(symbols)} coin taranıyor")
+
+    tick = get(BASE, f"{PREFIX}/ticker/24hr") or []
+    vol24 = {t["symbol"]: float(t["quoteVolume"]) for t in tick}
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        results = [r for r in ex.map(check, symbols) if r]
+    print(f"{len(results)} pump sinyali")
+
+    for symbol, price, pct, mult, close_ms in sorted(results, key=lambda x: -x[3]):
+        t = datetime.fromtimestamp(close_ms / 1000, TZ).strftime("%H:%M")
+        late = int((time.time() * 1000 - close_ms) / 60000)
+        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late >= 3 else ""
+        send(
+            f"🚀 PUMP {symbol}\n"
+            f"Saat: {t}\n"
+            f"Fiyat: {fmt(price)}\n"
+            f"15 dk: +{pct:.1f}%\n"
+            f"Hacim: {mult:.1f}x ortalama\n"
+            f"24s hacim: {fmt_vol(vol24.get(symbol, 0))} USDT{note}"
+        )
+        time.sleep(0.5)
+
+
+if __name__ == "__main__":
+    main()
