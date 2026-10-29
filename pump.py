@@ -158,19 +158,53 @@ def main():
         results = [r for r in ex.map(check, symbols) if r]
     print(f"{len(results)} pump sinyali")
 
-    for symbol, price, pct, mult, close_ms in sorted(results, key=lambda x: -x[3]):
-        t = datetime.fromtimestamp(close_ms / 1000, TZ).strftime("%H:%M")
+        import json
+    import os
+
+    STATE_FILE = "sent_signals.json"
+    
+    # Hafıza dosyasını yükle
+    sent_data = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                sent_data = json.load(f)
+        except:
+            sent_data = {}
+
+    for symbol, price, pct, mult, close_ms in sorted_results:
+        # Benzersiz anahtar (Coin + Mum Zamanı)
+        signal_key = f"{symbol}_{close_ms}"
+        
+        # Eğer bu mum için daha önce bildirim atıldıysa atla!
+        if signal_key in sent_data:
+            continue
+            
+        t = datetime.fromtimestamp(close_ms / 1000)
         late = int((time.time() * 1000 - close_ms) / 60000)
-        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late >= 3 else ""
+        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 2 else ""
+        
         send(
             f"🚀 PUMP {symbol}\n"
             f"Saat: {t}\n"
             f"Fiyat: {fmt(price)}\n"
             f"15 dk: +{pct:.1f}%\n"
             f"Hacim: {mult:.1f}x ortalama\n"
-            f"24s hacim: {fmt_vol(vol24.get(symbol, 0))} USDT{note}"
+            f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}"
+            f"{note}"
         )
+        
+        # Gönderildi olarak kaydet
+        sent_data[signal_key] = True
         time.sleep(0.5)
+
+    # Güncel hafızayı dosyaya kaydet
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(sent_data, f)
+    except:
+        pass
+        
 
 
 if __name__ == "__main__":
