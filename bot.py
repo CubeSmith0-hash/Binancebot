@@ -11,7 +11,8 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 INTERVAL = "15m"
 CANDLES = 8
 TZ = timezone(timedelta(hours=3))
-
+MAX_LATE_MIN = 4
+AGE_GATE = True
 # 24 saatlik USDT hacmi bu değerin altındaki coinler taranmaz.
 # Hepsini taramak için 0 yap.
 MIN_VOLUME = 5_000_000
@@ -138,6 +139,10 @@ def send(text):
 
 
 def main():
+        age_min = (time.time() * 1000 % 900000) / 60000
+        if AGE_GATE and age_min > MAX_LATE_MIN:
+            print(f"mum yeni kapanmadı ({age_min:.0f} dk geçmiş), atlandı")
+            return
     symbols = get_symbols()
     print(f"{len(symbols)} coin taranıyor")
     with ThreadPoolExecutor(max_workers=10) as ex:
