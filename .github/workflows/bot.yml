@@ -18,3 +18,5 @@ jobs:
       - run: python bot.py
       - run: python pump.py
         if: always()
+      - run: python saatlik.py
+        if: always()
