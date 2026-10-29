@@ -139,11 +139,12 @@ def send(text):
 
 
 def main():
-        age_min = (time.time() * 1000 % 900000) / 60000
-        if AGE_GATE and age_min > MAX_LATE_MIN:
-            print(f"mum yeni kapanmadı ({age_min:.0f} dk geçmiş), atlandı")
-            return
+    age_min = (time.time() * 1000 % 900000) / 60000
+    if AGE_GATE and age_min > MAX_LATE_MIN:
+        print(f"mum yeni kapanmadı ({age_min:.0f} dk geçmiş), atlandı")
+        return
     symbols = get_symbols()
+    
     print(f"{len(symbols)} coin taranıyor")
     with ThreadPoolExecutor(max_workers=10) as ex:
         results = [r for r in ex.map(check, symbols) if r]
