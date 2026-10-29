@@ -14,6 +14,8 @@ VOL_MULT = 5.0       # son mum hacmi ortalamanın en az kaç katı olmalı
 PRICE_PCT = 3.0      # son mumda en az % kaç artış (açılış -> kapanış)
 MIN_AVG_VOL = 200    # önceki mumların ortalama hacmi (USDT), bunun altı elenir
 TZ = timezone(timedelta(hours=3))
+MAX_LATE_MIN = 4
+AGE_GATE = True
 
 FAPI = "https://fapi.binance.com"
 SPOT = "https://data-api.binance.vision"
@@ -33,6 +35,10 @@ BAD_TYPES = {"EQUITY", "COMMODITY", "INDEX"}
 
 BASE = FAPI
 PREFIX = "/fapi/v1"
+    age_min = (time.time() * 1000 % 900000) / 60000
+    if AGE_GATE and age_min > MAX_LATE_MIN:
+        print(f"mum yeni kapanmadı ({age_min:.0f} dk geçmiş), atlandı")
+        return
 
 
 def get(base, path, params=None):
