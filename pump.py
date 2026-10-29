@@ -182,8 +182,8 @@ def main():
             continue
             
         from datetime import datetime, timedelta, timezone
-tr_timezone = timezone(timedelta(hours=3))
-t = datetime.now(tr_timezone).strftime('%H:%M')
+        tr_timezone = timezone(timedelta(hours=3))
+        t = datetime.now(tr_timezone).strftime('%H:%M')
 
         late = int((time.time() * 1000 - close_ms) / 60000)
         note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 2 else ""
