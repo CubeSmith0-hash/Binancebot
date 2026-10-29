@@ -158,7 +158,7 @@ def main():
         results = [r for r in ex.map(check, symbols) if r]
     print(f"{len(results)} pump sinyali")
 
-        import json
+    import json
     import os
 
     STATE_FILE = "sent_signals.json"
