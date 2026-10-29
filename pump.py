@@ -57,10 +57,7 @@ def keep(s):
         return False
     if "TradFi" in (s.get("underlyingSubType") or []):
         return False
-    base = s.get("baseAsset", "")
-    if base in NON_CRYPTO or (base.endswith("B") and base[:-1] in STOCKS):
-        return False
-        return True
+    
 
 
 def check(symbol):
