@@ -47,17 +47,22 @@ def get(base, path, params=None):
 
 
 def keep(s):
-    if s.get("quoteAsset") != "USDT" or s.get("status") != "TRADING":
+    if s.get("quoteAsset") != "USDT":
+        return False
+    if s.get("status") != "TRADING":
         return False
     if s.get("contractType", "PERPETUAL") != "PERPETUAL":
         return False
-    if s.get("baseAsset") in STABLES:
+    base = s.get("baseAsset", "")
+    if base in STABLES or base in NON_CRYPTO:
+        return False
+    if base.endswith("B") and base[:-1] in STOCKS:
         return False
     if s.get("underlyingType") in BAD_TYPES:
         return False
     if "TradFi" in (s.get("underlyingSubType") or []):
         return False
-    
+    return True
 
 
 def check(symbol):
@@ -129,8 +134,11 @@ def main():
         print("Borsa verisi alınamadı")
         return
 
-    symbols = [s["symbol"] for s in info["symbols"] if keep(s)]
-    print(f"[{mode}] {len(symbols)} coin taranıyor")
+    all_syms = info.get("symbols", [])
+    symbols = [s["symbol"] for s in all_syms if keep(s)]
+    print(f"[{mode}] borsada {len(all_syms)} parite var, {len(symbols)} coin taranıyor")
+    if not symbols and all_syms:
+        print("örnek parite:", all_syms[0])
 
     tick = get(BASE, f"{PREFIX}/ticker/24hr") or []
     vol24 = {t["symbol"]: float(t["quoteVolume"]) for t in tick}
