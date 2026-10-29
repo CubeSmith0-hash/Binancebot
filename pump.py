@@ -35,10 +35,12 @@ BAD_TYPES = {"EQUITY", "COMMODITY", "INDEX"}
 
 BASE = FAPI
 PREFIX = "/fapi/v1"
+     def mum_kontrol():
     age_min = (time.time() * 1000 % 900000) / 60000
     if AGE_GATE and age_min > MAX_LATE_MIN:
         print(f"mum yeni kapanmadı ({age_min:.0f} dk geçmiş), atlandı")
         return
+        
     
 
 
