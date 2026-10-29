@@ -172,7 +172,8 @@ def main():
         except:
             sent_data = {}
 
-    for symbol, price, pct, mult, close_ms in sorted_results:
+    for symbol, price, pct, mult, close_ms in results:
+        
         # Benzersiz anahtar (Coin + Mum Zamanı)
         signal_key = f"{symbol}_{close_ms}"
         
