@@ -13,7 +13,7 @@ LONG_AFTER_RED = 11      # üst üste bu kadar kırmızı mum kapanınca LONG
 SHORT_AFTER_GREEN = 12   # üst üste bu kadar yeşil mum kapanınca SHORT
 MIN_VOLUME = 5_000_000   # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
 AGE_GATE = True          # sadece saat başında tara (test için False yap)
-MAX_AGE_MIN = 14         # saat başından en fazla kaç dk sonra çalışırsa tarasın
+MAX_AGE_MIN = 4         # saat başından en fazla kaç dk sonra çalışırsa tarasın
 TZ = timezone(timedelta(hours=3))
 
 HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
