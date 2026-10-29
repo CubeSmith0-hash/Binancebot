@@ -149,13 +149,46 @@ def main():
     with ThreadPoolExecutor(max_workers=10) as ex:
         results = [r for r in ex.map(check, symbols) if r]
 
+        import json
+    import os
+
+    STATE_FILE = "sent_signals.json"
+    
+    # Hafıza dosyasını yükle
+    sent_data = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                sent_data = json.load(f)
+        except:
+            sent_data = {}
+
     for symbol, side, price, close_ms in results:
-        t = datetime.fromtimestamp(close_ms / 1000, TZ).strftime("%H:%M")
+        # Benzersiz anahtar (Coin + Mum Zamanı)
+        signal_key = f"{symbol}_{close_ms}"
+        
+        # Eğer bu mum için daha önce bildirim atıldıysa atla!
+        if signal_key in sent_data:
+            continue
+            
+        t = datetime.fromtimestamp(close_ms / 1000)
         late = int((time.time() * 1000 - close_ms) / 60000)
-        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late >= 3 else ""
+        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 2 else ""
         icon = "🟢" if side == "LONG" else "🔴"
-        send(f"{icon} {symbol} {side}\nSaat: {t}\nFiyat: {fmt(price)}{note}")
+        
+        send(f"{icon} {symbol} {side}\nSaat: {t}\nFiyat: {price}{note}")
+        
+        # Gönderildi olarak kaydet ve listeye ekle
+        sent_data[signal_key] = True
         time.sleep(0.5)
+
+    # Güncel hafızayı dosyaya kaydet
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(sent_data, f)
+    except:
+        pass
+        
 
 
 if __name__ == "__main__":
