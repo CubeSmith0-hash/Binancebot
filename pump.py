@@ -181,26 +181,26 @@ def main():
         if signal_key in sent_data:
             continue
             
-        from datetime import datetime, timedelta, timezone
-        tr_timezone = timezone(timedelta(hours=3))
-        t = datetime.now(tr_timezone).strftime('%H:%M')
+    from datetime import datetime, timedelta, timezone
+    tr_timezone = timezone(timedelta(hours=3))
+    t = datetime.now(tr_timezone).strftime('%H:%M')
 
-        late = int((time.time() * 1000 - close_ms) / 60000)
-        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 2 else ""
-        
-        send(
-            f"🚀 PUMP {symbol}\n"
-            f"Saat: {t}\n"
-            f"Fiyat: {fmt(price)}\n"
-            f"15 dk: +{pct:.1f}%\n"
-            f"Hacim: {mult:.1f}x ortalama\n"
-            f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}"
-            f"{note}"
-        )
-        
-        # Gönderildi olarak kaydet
-        sent_data[signal_key] = True
-        time.sleep(0.5)
+    late = int((time.time() * 1000 - close_ms) / 60000)
+    note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 2 else ""
+
+    send(
+        f"🚀 PUMP {symbol}\n"
+        f"Saat: {t}\n"
+        f"Fiyat: {fmt(price)}\n"
+        f"15 dk: +{pct:.1f}%\n"
+        f"Hacim: {mult:.1f}x ortalama\n"
+        f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}\n"
+        f"{note}"
+    )
+
+    sent_data[signal_key] = True
+    time.sleep(0.5)
+    
 
     # Güncel hafızayı dosyaya kaydet
     try:
