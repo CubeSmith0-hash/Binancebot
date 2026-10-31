@@ -175,11 +175,12 @@ def main():
     for symbol, price, pct, mult, close_ms in results:
         
         # Benzersiz anahtar (Coin + Mum Zamanı)
-      close_ms = locals().get("close_ms") or 0
-      signal_key = f"{symbol}_{close_ms}"
+    close_ms = locals().get("close_ms") or 0
+    signal_key = f"{symbol}_{close_ms}"
 
-  if signal_key in sent_data:
-  continue
+    if signal_key in sent_data:
+      continue
+        
 
   from datetime import datetime, timedelta, timezone
 
@@ -189,20 +190,20 @@ def main():
   late = int((time.time() * 1000 - close_ms) / 60000)
   note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
 
-  text = (
+    text = (
     f"🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk:"
     f" +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim:"
     f" {fmt_vol(vol24.get(symbol, 0))}\n{note}"
 )
 
-url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 payload = {"chat_id": CHAT_ID, "text": text}
 
-r = requests.post(url, json=payload, timeout=15)
+    r = requests.post(url, json=payload, timeout=15)
 print("telegram:", r.status_code)
 
 sent_data[signal_key] = True
-time.sleep(0.5)
+    time.sleep(0.5)
 
 try:
   with open(STATE_FILE, "w") as f:
