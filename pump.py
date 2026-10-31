@@ -175,8 +175,8 @@ def main():
     for symbol, price, pct, mult, close_ms in results:
         
         # Benzersiz anahtar (Coin + Mum Zamanı)
-close_ms = locals().get("close_ms") or 0
-signal_key = f"{symbol}_{close_ms}"
+      close_ms = locals().get("close_ms") or 0
+      signal_key = f"{symbol}_{close_ms}"
 
 if signal_key in sent_data:
   continue
