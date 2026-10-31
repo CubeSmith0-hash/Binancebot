@@ -201,12 +201,8 @@ payload = {"chat_id": CHAT_ID, "text": text}
 r = requests.post(url, json=payload, timeout=15)
 print("telegram:", r.status_code)
 
-
-
-    
-
-    sent_data[signal_key] = True
-    time.sleep(0.5)
+sent_data[signal_key] = True
+time.sleep(0.5)
     
 
     # Güncel hafızayı dosyaya kaydet
