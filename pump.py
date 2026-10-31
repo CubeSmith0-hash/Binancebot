@@ -195,11 +195,12 @@ text = (
     f" {fmt_vol(vol24.get(symbol, 0))}\n{note}"
 )
 
-# Telegram mesajını gönder
-r = requests.post(
-    f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-    json={"chat_id": CHAT_ID, "text": text},
-    timeout=15,
+url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+payload = {"chat_id": CHAT_ID, "text": text}
+
+r = requests.post(url, json=payload, timeout=15)
+print("telegram:", r.status_code)
+
 )
 
     )
