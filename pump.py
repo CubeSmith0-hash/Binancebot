@@ -175,9 +175,7 @@ def main():
     for symbol, price, pct, mult, close_ms in results:
         
         # Benzersiz anahtar (Coin + Mum Zamanı)
-close_ms = (
-    locals().get("close_ms") or 0
-)  # Hata vermemesi için güvenli kontrol
+close_ms = locals().get("close_ms") or 0
 signal_key = f"{symbol}_{close_ms}"
 
 if signal_key in sent_data:
@@ -191,7 +189,18 @@ t = datetime.now(tr_timezone).strftime("%H:%M")
 late = int((time.time() * 1000 - close_ms) / 60000)
 note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
 
-text = f"""🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk: +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim: {fmt_vol(vol24.get(symbol, 0))}\n{note}"""
+text = (
+    f"🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk:"
+    f" +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim:"
+    f" {fmt_vol(vol24.get(symbol, 0))}\n{note}"
+)
+
+# Telegram mesajını gönder
+r = requests.post(
+    f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+    json={"chat_id": CHAT_ID, "text": text},
+    timeout=15,
+)
 
     )
 
