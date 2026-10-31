@@ -203,14 +203,13 @@ print("telegram:", r.status_code)
 
 sent_data[signal_key] = True
 time.sleep(0.5)
-    
 
-    # Güncel hafızayı dosyaya kaydet
-    try:
-      with open(STATE_FILE, "w") as f:
-        json.dump(sent_data, f)
-    except:
-      pass
+try:
+  with open(STATE_FILE, "w") as f:
+    json.dump(sent_data, f)
+except:
+  pass
+    
         
 
 
