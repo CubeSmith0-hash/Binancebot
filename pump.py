@@ -175,27 +175,24 @@ def main():
     for symbol, price, pct, mult, close_ms in results:
         
         # Benzersiz anahtar (Coin + Mum Zamanı)
-        signal_key = f"{symbol}_{close_ms}"
-        
-        
-        if signal_key in sent_data:
-            continue
-            
-    from datetime import datetime, timedelta, timezone
-    tr_timezone = timezone(timedelta(hours=3))
-    t = datetime.now(tr_timezone).strftime('%H:%M')
+close_ms = (
+    locals().get("close_ms") or 0
+)  # Hata vermemesi için güvenli kontrol
+signal_key = f"{symbol}_{close_ms}"
 
-    late = int((time.time() * 1000 - close_ms) / 60000)
-    note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 2 else ""
+if signal_key in sent_data:
+  continue
 
-    send(
-        f"🚀 PUMP {symbol}\n"
-        f"Saat: {t}\n"
-        f"Fiyat: {fmt(price)}\n"
-        f"15 dk: +{pct:.1f}%\n"
-        f"Hacim: {mult:.1f}x ortalama\n"
-        f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}\n"
-        f"{note}"
+from datetime import datetime, timedelta, timezone
+
+tr_timezone = timezone(timedelta(hours=3))
+t = datetime.now(tr_timezone).strftime("%H:%M")
+
+late = int((time.time() * 1000 - close_ms) / 60000)
+note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
+
+text = f"""🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk: +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim: {fmt_vol(vol24.get(symbol, 0))}\n{note}"""
+
     )
 
     sent_data[signal_key] = True
