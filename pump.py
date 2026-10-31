@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ MIN_AVG_VOL = 200    # önceki mumların ortalama hacmi (USDT), bunun altı elen
 TZ = timezone(timedelta(hours=3))
 MAX_LATE_MIN = 4
 AGE_GATE = True
+STATE_FILE = "sent_signals.json"
 
 FAPI = "https://fapi.binance.com"
 SPOT = "https://data-api.binance.vision"
@@ -35,15 +37,15 @@ BAD_TYPES = {"EQUITY", "COMMODITY", "INDEX"}
 
 BASE = FAPI
 PREFIX = "/fapi/v1"
+
+
 def mum_kontrol():
+    """Mum yeni kapandıysa True, geç kalındıysa False döner."""
     age_min = (time.time() * 1000 % 900000) / 60000
     if AGE_GATE and age_min > MAX_LATE_MIN:
         print(f"mum yeni kapanmadı ({age_min:.0f} dk geçmiş), atlandı")
-        return
-        
-        
-    
-
+        return False
+    return True
 
 
 def get(base, path, params=None):
@@ -135,6 +137,10 @@ def send(text):
 
 def main():
     global BASE, PREFIX
+
+    if not mum_kontrol():
+        return
+
     mode = "futures"
     info = get(FAPI, "/fapi/v1/exchangeInfo")
     if not info:
@@ -158,61 +164,43 @@ def main():
         results = [r for r in ex.map(check, symbols) if r]
     print(f"{len(results)} pump sinyali")
 
-    import json
-    import os
-
-    STATE_FILE = "sent_signals.json"
-    
     # Hafıza dosyasını yükle
     sent_data = {}
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
                 sent_data = json.load(f)
-        except:
+        except (OSError, ValueError):
             sent_data = {}
 
     for symbol, price, pct, mult, close_ms in results:
-        
         # Benzersiz anahtar (Coin + Mum Zamanı)
-    close_ms = locals().get("close_ms") or 0
-    signal_key = f"{symbol}_{close_ms}"
+        signal_key = f"{symbol}_{close_ms}"
+        if signal_key in sent_data:
+            continue
 
-    if signal_key in sent_data:
-      continue
-        
+        t = datetime.now(TZ).strftime("%H:%M")
 
-  from datetime import datetime, timedelta, timezone
+        late = int((time.time() * 1000 - close_ms) / 60000)
+        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
 
-  tr_timezone = timezone(timedelta(hours=3))
-  t = datetime.now(tr_timezone).strftime("%H:%M")
+        text = (
+            f"🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk:"
+            f" +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim:"
+            f" {fmt_vol(vol24.get(symbol, 0))}\n{note}"
+        )
 
-  late = int((time.time() * 1000 - close_ms) / 60000)
-  note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
+        send(text)
+        sent_data[signal_key] = True
+        time.sleep(0.5)
 
-    text = (
-    f"🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk:"
-    f" +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim:"
-    f" {fmt_vol(vol24.get(symbol, 0))}\n{note}"
-)
-
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-payload = {"chat_id": CHAT_ID, "text": text}
-
-    r = requests.post(url, json=payload, timeout=15)
-print("telegram:", r.status_code)
-
-sent_data[signal_key] = True
-    time.sleep(0.5)
-
-try:
-  with open(STATE_FILE, "w") as f:
-    json.dump(sent_data, f)
-except:
-  pass
-    
-        
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(sent_data, f)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
     main()
+            
