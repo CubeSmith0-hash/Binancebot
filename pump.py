@@ -177,7 +177,7 @@ def main():
         # Benzersiz anahtar (Coin + Mum Zamanı)
         signal_key = f"{symbol}_{close_ms}"
         
-        # Eğer bu mum için daha önce bildirim atıldıysa atla!
+        
         if signal_key in sent_data:
             continue
             
