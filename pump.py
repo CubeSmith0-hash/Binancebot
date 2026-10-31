@@ -178,18 +178,18 @@ def main():
       close_ms = locals().get("close_ms") or 0
       signal_key = f"{symbol}_{close_ms}"
 
-if signal_key in sent_data:
+  if signal_key in sent_data:
   continue
 
-from datetime import datetime, timedelta, timezone
+  from datetime import datetime, timedelta, timezone
 
-tr_timezone = timezone(timedelta(hours=3))
-t = datetime.now(tr_timezone).strftime("%H:%M")
+  tr_timezone = timezone(timedelta(hours=3))
+  t = datetime.now(tr_timezone).strftime("%H:%M")
 
-late = int((time.time() * 1000 - close_ms) / 60000)
-note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
+  late = int((time.time() * 1000 - close_ms) / 60000)
+  note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
 
-text = (
+  text = (
     f"🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk:"
     f" +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim:"
     f" {fmt_vol(vol24.get(symbol, 0))}\n{note}"
