@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,13 +10,14 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 INTERVAL = "15m"
-CANDLES = 8
+CANDLES = 9              # üst üste bu kadar yeşil mum kapanınca LONG
 TZ = timezone(timedelta(hours=3))
 MAX_LATE_MIN = 4
 AGE_GATE = True
+STATE_FILE = "sent_signals.json"
 # 24 saatlik USDT hacmi bu değerin altındaki coinler taranmaz.
 # Hepsini taramak için 0 yap.
-MIN_VOLUME = 5_000_000
+MIN_VOLUME = 1_000_000
 
 STABLES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
@@ -30,13 +32,13 @@ STOCKS = {
 }
 NON_CRYPTO = {"PAXG", "XAUT"}
 
+HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
+
 
 def is_excluded(base):
     if base in NON_CRYPTO:
         return True
     return base.endswith("B") and base[:-1] in STOCKS
-
-HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
 
 
 def api_get(path, params=None):
@@ -50,29 +52,27 @@ def api_get(path, params=None):
     return None
 
 
-
 def get_symbols():
     info = api_get("/api/v3/exchangeInfo")
     if not info:
         return []
-    
+
     syms = []
     for s in info["symbols"]:
-        if s["quoteAsset"] == "USDT" \
-           and s["status"] == "TRADING" \
-           and s["baseAsset"] not in STABLES \
-           and not is_excluded(s["baseAsset"]):
+        if (
+            s["quoteAsset"] == "USDT"
+            and s["status"] == "TRADING"
+            and s["baseAsset"] not in STABLES
+            and not is_excluded(s["baseAsset"])
+        ):
             syms.append(s["symbol"])
-            
+
     if MIN_VOLUME > 0:
         tick = api_get("/api/v3/ticker/24hr") or []
         vols = {t["symbol"]: float(t["quoteVolume"]) for t in tick}
         syms = [s for s in syms if vols.get(s, 0) > MIN_VOLUME]
-        
+
     return syms
-    
-
-
 
 
 def color(c):
@@ -98,27 +98,16 @@ def check(symbol):
             return None
         last = closed[-CANDLES:]
         prev = closed[-CANDLES - 1]
-        cols = [color(c) for c in last]
-        if all(x == "G" for x in cols):
-            side = "LONG"
-            if color(prev) == "G":
-                return None
-        elif all(x == "R" for x in cols):
-            side = "SHORT"
-            if color(prev) == "R":
-                return None
-        else:
+        # Son 9 mumun hepsi yeşil olmalı
+        if not all(color(c) == "G" for c in last):
+            return None
+        # Seri tam şimdi 9'a ulaşmış olmalı (önceki mum yeşil değil)
+        if color(prev) == "G":
             return None
         close_ms = int(last[-1][6]) + 1
-        return symbol, side, float(last[-1][4]), close_ms
+        return symbol, float(last[-1][4]), close_ms
     except Exception:
         return None
-
-
-def fmt(p):
-    if p < 1:
-        return f"{p:.8f}".rstrip("0").rstrip(".")
-    return f"{p:.4f}".rstrip("0").rstrip(".")
 
 
 def send(text):
@@ -138,60 +127,54 @@ def send(text):
             time.sleep(2)
 
 
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
+    return {}
+
+
+def save_state(data):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f)
+    except OSError as e:
+        print("state yazılamadı", e)
+
+
 def main():
     age_min = (time.time() * 1000 % 900000) / 60000
     if AGE_GATE and age_min > MAX_LATE_MIN:
         print(f"mum yeni kapanmadı ({age_min:.0f} dk geçmiş), atlandı")
         return
+
     symbols = get_symbols()
-    
     print(f"{len(symbols)} coin taranıyor")
     with ThreadPoolExecutor(max_workers=10) as ex:
         results = [r for r in ex.map(check, symbols) if r]
+    print(f"{len(results)} sinyal")
 
-        import json
-    import os
+    sent_data = load_state()
 
-    STATE_FILE = "sent_signals.json"
-    
-    # Hafıza dosyasını yükle
-    sent_data = {}
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                sent_data = json.load(f)
-        except:
-            sent_data = {}
-
-    for symbol, side, price, close_ms in results:
+    for symbol, price, close_ms in results:
         # Benzersiz anahtar (Coin + Mum Zamanı)
-        signal_key = f"{symbol}_{close_ms}"
-        
-        # Eğer bu mum için daha önce bildirim atıldıysa atla!
+        signal_key = f"LONG_{symbol}_{close_ms}"
         if signal_key in sent_data:
             continue
-            
-        from datetime import datetime, timedelta, timezone
-        tr_timezone = timezone(timedelta(hours=3))
-        t = datetime.now(tr_timezone).strftime('%H:%M')
 
+        # Önce kaydet, sonra gönder
+        sent_data[signal_key] = True
+        save_state(sent_data)
+
+        t = datetime.now(TZ).strftime("%H:%M")
         late = int((time.time() * 1000 - close_ms) / 60000)
         note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 2 else ""
-        icon = "🟢" if side == "LONG" else "🔴"
-        
-        send(f"{icon} {symbol} {side}\nSaat: {t}\nFiyat: {price}{note}")
-        
-        # Gönderildi olarak kaydet ve listeye ekle
-        sent_data[signal_key] = True
-        time.sleep(0.5)
 
-    # Güncel hafızayı dosyaya kaydet
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(sent_data, f)
-    except:
-        pass
-        
+        send(f"🟢 {symbol} LONG\n{CANDLES} ardışık yeşil mum\nSaat: {t}\nFiyat: {price}{note}")
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":
