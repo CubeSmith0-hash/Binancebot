@@ -2,10 +2,18 @@ name: signal-bot
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
+
+# Aynı anda tek iş çalışır, yenisi sıraya girer (çift mesaj olmaz)
+concurrency:
+  group: signal-bot
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 340
     env:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -15,8 +23,20 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python bot.py
-      - run: python pump.py
-        if: always()
-      - run: python saatlik.py
-        if: always()
+      - name: Mum kapanışlarında tara
+        run: |
+          END=$(( $(date +%s) + 320*60 ))
+          while true; do
+            NOW=$(date +%s)
+            NEXT=$(( (NOW / 900 + 1) * 900 ))
+            if [ $(( NEXT + 2 )) -gt $END ]; then
+              break
+            fi
+            sleep $(( NEXT + 2 - NOW ))
+            python bot.py &
+            python pump.py &
+            if [ $(( NEXT % 3600 )) -eq 0 ]; then
+              python saatlik.py &
+            fi
+            wait
+          done
