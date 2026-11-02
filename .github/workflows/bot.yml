@@ -2,18 +2,13 @@ name: signal-bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *"
 
-# Aynı anda tek iş çalışır, yenisi sıraya girer (çift mesaj olmaz)
-concurrency:
-  group: signal-bot
-  cancel-in-progress: false
+permissions:
+  contents: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
     env:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -23,20 +18,19 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - name: Mum kapanışlarında tara
+      - run: python bot.py
+      - run: python pump.py
+        if: always()
+      - run: python saatlik.py
+        if: always()
+      - name: Kaydet
+        if: always()
         run: |
-          END=$(( $(date +%s) + 320*60 ))
-          while true; do
-            NOW=$(date +%s)
-            NEXT=$(( (NOW / 900 + 1) * 900 ))
-            if [ $(( NEXT + 2 )) -gt $END ]; then
-              break
-            fi
-            sleep $(( NEXT + 2 - NOW ))
-            python bot.py &
-            python pump.py &
-            if [ $(( NEXT % 3600 )) -eq 0 ]; then
-              python saatlik.py &
-            fi
-            wait
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          for f in sent_signals.json saatlik_state.json; do
+            if [ -f "$f" ]; then git add "$f"; fi
           done
+          git commit -m "state" || exit 0
+          git pull --rebase || true
+          git push
