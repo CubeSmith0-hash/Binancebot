@@ -16,7 +16,7 @@ PRICE_PCT = 5.0      # son mumda en az % kaç artış (açılış -> kapanış)
 MIN_AVG_VOL = 200    # önceki mumların ortalama hacmi (USDT), bunun altı elenir
 TZ = timezone(timedelta(hours=3))
 MAX_LATE_MIN = 4
-AGE_GATE = True
+AGE_GATE = False
 STATE_FILE = "sent_signals.json"
 
 FAPI = "https://fapi.binance.com"
