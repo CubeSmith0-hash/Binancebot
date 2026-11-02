@@ -17,7 +17,7 @@ AGE_GATE = True
 STATE_FILE = "sent_signals.json"
 # 24 saatlik USDT hacmi bu değerin altındaki coinler taranmaz.
 # Hepsini taramak için 0 yap.
-MIN_VOLUME = 1_000_000
+MIN_VOLUME = 100_000
 
 STABLES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
