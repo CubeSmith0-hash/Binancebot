@@ -13,7 +13,7 @@ INTERVAL = "15m"
 CANDLES = 9              # üst üste bu kadar yeşil mum kapanınca LONG
 TZ = timezone(timedelta(hours=3))
 MAX_LATE_MIN = 4
-AGE_GATE = False
+AGE_GATE = True
 STATE_FILE = "sent_signals.json"
 # 24 saatlik USDT hacmi bu değerin altındaki coinler taranmaz.
 # Hepsini taramak için 0 yap.
