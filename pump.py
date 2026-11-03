@@ -10,13 +10,13 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 INTERVAL = "15m"
-LOOKBACK = 8            # ortalama hacim için önceki mum sayısı
-VOL_MULT = 3.0          # son mum hacmi ortalamanın en az kaç katı olmalı
-PRICE_PCT = 3.0         # son mumda en az % kaç artış (açılış -> kapanış)
-MIN_AVG_VOL = 1000      # önceki mumların ortalama hacmi (USDT), bunun altı elenir
+LOOKBACK = 20        # ortalama hacim için önceki mum sayısı
+VOL_MULT = 5.0       # son mum hacmi ortalamanın en az kaç katı olmalı
+PRICE_PCT = 3.0      # son mumda en az % kaç artış (açılış -> kapanış)
+MIN_AVG_VOL = 200    # önceki mumların ortalama hacmi (USDT), bunun altı elenir
 TZ = timezone(timedelta(hours=3))
 MAX_LATE_MIN = 4
-AGE_GATE = False
+AGE_GATE = True
 STATE_FILE = "sent_signals.json"
 
 FAPI = "https://fapi.binance.com"
@@ -94,11 +94,6 @@ def check(symbol):
         return None
     pct = (cl / o - 1) * 100
     if pct < PRICE_PCT:
-        return None
-    hi, lo = float(last[2]), float(last[3])
-    if hi > lo and (cl - lo) / (hi - lo) < 0.7:
-        return None
-    if cl <= max(float(c[2]) for c in prev):
         return None
     avg = sum(float(c[7]) for c in prev) / len(prev)
     if avg < MIN_AVG_VOL:
@@ -181,24 +176,30 @@ def main():
     for symbol, price, pct, mult, close_ms in results:
         # Benzersiz anahtar (Coin + Mum Zamanı)
         signal_key = f"{symbol}_{close_ms}"
+
+        # Bu mum için daha önce bildirim atıldıysa atla
         if signal_key in sent_data:
             continue
 
         t = datetime.now(TZ).strftime("%H:%M")
 
         late = int((time.time() * 1000 - close_ms) / 60000)
-        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
+        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 2 else ""
 
-        text = (
-            f"🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk:"
-            f" +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim:"
-            f" {fmt_vol(vol24.get(symbol, 0))}\n{note}"
+        send(
+            f"🚀 PUMP {symbol}\n"
+            f"Saat: {t}\n"
+            f"Fiyat: {fmt(price)}\n"
+            f"15 dk: +{pct:.1f}%\n"
+            f"Hacim: {mult:.1f}x ortalama\n"
+            f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}\n"
+            f"{note}"
         )
 
-        send(text)
         sent_data[signal_key] = True
         time.sleep(0.5)
 
+    # Güncel hafızayı dosyaya kaydet
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(sent_data, f)
@@ -208,4 +209,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
