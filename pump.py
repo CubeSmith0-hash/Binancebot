@@ -10,9 +10,9 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 INTERVAL = "5m"
-LOOKBACK = 3          # ortalama hacim için önceki mum sayısı
-VOL_MULT = 6.0         # son mum hacmi ortalamanın en az kaç katı olmalı
-PRICE_PCT = 3.0        # son mumda en az % kaç artış (açılış -> kapanış)
+LOOKBACK = 6           # ortalama hacim için önceki mum sayısı
+VOL_MULT = 3.0         # son mum hacmi ortalamanın en az kaç katı olmalı
+PRICE_PCT = 1.5        # son mumda en az % kaç artış (açılış -> kapanış)
 MIN_AVG_VOL = 1000     # önceki mumların ortalama hacmi (USDT), bunun altı elenir
 TZ = timezone(timedelta(hours=3))
 MAX_LATE_MIN = 4
@@ -94,6 +94,11 @@ def check(symbol):
         return None
     pct = (cl / o - 1) * 100
     if pct < PRICE_PCT:
+        return None
+    hi, lo = float(last[2]), float(last[3])
+    if hi > lo and (cl - lo) / (hi - lo) < 0.7:
+        return None
+    if cl <= max(float(c[2]) for c in prev):
         return None
     avg = sum(float(c[7]) for c in prev) / len(prev)
     if avg < MIN_AVG_VOL:
