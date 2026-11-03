@@ -18,11 +18,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python bot.py
       - run: python pump.py
-        if: always()
-      - run: python dump.py
-        if: always()
       - run: python saatlik.py
         if: always()
       - name: Kaydet
