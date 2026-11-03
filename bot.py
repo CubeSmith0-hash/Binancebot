@@ -10,7 +10,7 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 INTERVAL = "15m"
-CANDLES = 9              # üst üste bu kadar yeşil mum kapanınca LONG
+CANDLES = 8              # üst üste bu kadar yeşil mum kapanınca LONG
 TZ = timezone(timedelta(hours=3))
 MAX_LATE_MIN = 4
 AGE_GATE = False
