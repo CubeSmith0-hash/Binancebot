@@ -9,11 +9,11 @@ import requests
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-INTERVAL = "15m"
-LOOKBACK = 2         # ortalama hacim için önceki mum sayısı
-VOL_MULT = 5.0       # son mum hacmi ortalamanın en az kaç katı olmalı
-PRICE_PCT = 5.0      # son mumda en az % kaç artış (açılış -> kapanış)
-MIN_AVG_VOL = 200    # önceki mumların ortalama hacmi (USDT), bunun altı elenir
+INTERVAL = "5m"
+LOOKBACK = 12         # ortalama hacim için önceki mum sayısı
+VOL_MULT = 4.0        # son mum hacmi ortalamanın en az kaç katı olmalı
+PRICE_PCT = 2.5       # son mumda en az % kaç artış (açılış -> kapanış)
+MIN_AVG_VOL = 500     # önceki mumların ortalama hacmi (USDT), bunun altı elenir
 TZ = timezone(timedelta(hours=3))
 MAX_LATE_MIN = 4
 AGE_GATE = False
@@ -41,7 +41,7 @@ PREFIX = "/fapi/v1"
 
 def mum_kontrol():
     """Mum yeni kapandıysa True, geç kalındıysa False döner."""
-    age_min = (time.time() * 1000 % 900000) / 60000
+    age_min = (time.time() * 1000 % 300000) / 60000
     if AGE_GATE and age_min > MAX_LATE_MIN:
         print(f"mum yeni kapanmadı ({age_min:.0f} dk geçmiş), atlandı")
         return False
@@ -185,7 +185,7 @@ def main():
         note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 0 else ""
 
         text = (
-            f"🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n15 dk:"
+            f"🚀 PUMP {symbol}\nSaat: {t}\nFiyat: {fmt(price)}\n5 dk:"
             f" +{pct:.1f}%\nHacim: {mult:.1f}x ortalama\n24s hacim:"
             f" {fmt_vol(vol24.get(symbol, 0))}\n{note}"
         )
