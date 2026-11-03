@@ -10,7 +10,7 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 INTERVAL = "15m"
-LOOKBACK = 20        # ortalama hacim için önceki mum sayısı
+LOOKBACK = 2         # ortalama hacim için önceki mum sayısı
 VOL_MULT = 5.0       # son mum hacmi ortalamanın en az kaç katı olmalı
 PRICE_PCT = 5.0      # son mumda en az % kaç artış (açılış -> kapanış)
 MIN_AVG_VOL = 200    # önceki mumların ortalama hacmi (USDT), bunun altı elenir
