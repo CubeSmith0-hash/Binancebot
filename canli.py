@@ -16,7 +16,7 @@ MIN_PCT = 5.0             # pencere içindeki dipten en az % kaç yükseliş
 VOL_MULT = 5.0            # pencere hacmi, normal hacmin en az kaç katı olmalı
 MIN_WINDOW_VOL = 5_000    # pencerede en az bu kadar USDT hacim olmalı
 MIN_24H_VOL = 100_000     # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
-COOLDOWN_MIN = 15          # aynı coin için tekrar sinyal bekleme süresi (dk)
+COOLDOWN_MIN = 5          # aynı coin için tekrar sinyal bekleme süresi (dk)
 HISTORY_SEC = WINDOW_SEC + 30
 TZ = timezone(timedelta(hours=3))
 STATE_FILE = "canli_state.json"
