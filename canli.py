@@ -10,19 +10,21 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))  # ne kadar süre çalışsın
-POLL_SEC = 5                # kaç saniyede bir taransın
-WINDOW_SEC = 100            # son kaç saniyeye bakılsın
-MIN_PCT = 4.0               # pencere içindeki dipten en az % kaç yükseliş
-VOL_MULT = 5.0              # pencere hacmi, normal hacmin en az kaç katı olmalı
-MIN_WINDOW_VOL = 5_000      # pencerede en az bu kadar USDT hacim olmalı
-MIN_24H_VOL = 50_000        # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
-COOLDOWN_MIN = 5            # aynı coin için tekrar sinyal bekleme süresi (dk)
+POLL_SEC = 5               # kaç saniyede bir taransın
+WINDOW_SEC = 100           # son kaç saniyeye bakılsın
+MIN_PCT = 4.0              # pencere içindeki dipten en az % kaç yükseliş
+VOL_MULT = 5.0             # pencere hacmi, normal hacmin en az kaç katı olmalı
+MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USDT hacim olmalı
+MIN_24H_VOL = 50_000       # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
+COOLDOWN_MIN = 5           # aynı coin için tekrar sinyal bekleme süresi (dk)
 HISTORY_SEC = WINDOW_SEC + 30
 TZ = timezone(timedelta(hours=3))
 STATE_FILE = "canli_state.json"
 
-# Spot
-HOSTS = ["https://data-api.binance.vision", "https://api.binance.com"]
+# Bitget USDT-M Futures
+HOST = "https://api.bitget.com"
+TICKER_PATH = "/api/v2/mix/market/tickers"
+TICKER_PARAMS = {"productType": "USDT-FUTURES"}
 
 STABLES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
@@ -33,20 +35,20 @@ STOCKS = {
     "COIN", "MSTR", "CRCL", "HOOD", "SPY", "QQQ", "NFLX", "AMD",
     "INTC", "BABA", "PLTR", "ORCL", "AVGO", "JPM", "V", "MA", "DIS",
     "PYPL", "UBER", "SHOP", "SQ", "TSM", "NKE", "KO", "PEP", "WMT",
+    "DELL", "IBM", "NOW", "CRM", "IREN", "BX", "HPE", "CRWD",
 }
 NON_CRYPTO = {"PAXG", "XAUT"}
 
 HISTORY = {}      # sembol -> deque[(zaman, fiyat, 24s_usdt_hacim)]
 LAST_ALERT = {}   # sembol -> son sinyal zamanı
 WATCH = set()     # taranacak semboller
-USE_MINI = True
 
 
-def keep(s):
-    if s.get("quoteAsset") != "USDT" or s.get("status") != "TRADING":
+def keep(sym):
+    if not sym.endswith("USDT"):
         return False
-    base = s.get("baseAsset", "")
-    if base in STABLES or base in NON_CRYPTO:
+    base = sym[:-4]
+    if base in STABLES or base in NON_CRYPTO or base in STOCKS:
         return False
     if base.endswith("B") and base[:-1] in STOCKS:
         return False
@@ -65,23 +67,6 @@ def fmt_vol(v):
     if v >= 1e3:
         return f"{v / 1e3:.0f}K"
     return f"{v:.0f}"
-
-
-def api(path, params=None):
-    """(durum_kodu, json) döndürür."""
-    status = 0
-    for host in HOSTS:
-        try:
-            r = requests.get(host + path, params=params, timeout=15)
-            status = r.status_code
-            if r.status_code == 200:
-                return 200, r.json()
-            print("HTTP", r.status_code, path)
-            if r.status_code in (418, 429):
-                return r.status_code, None
-        except requests.RequestException as e:
-            print("hata", path, e)
-    return status, None
 
 
 def send(text):
@@ -121,34 +106,42 @@ def save_state():
         print("state yazılamadı", e)
 
 
-def refresh_symbols(vols):
-    status, info = api("/api/v3/exchangeInfo")
-    if not info:
-        return
-    WATCH.clear()
-    for s in info["symbols"]:
-        if keep(s) and vols.get(s["symbol"], 0) >= MIN_24H_VOL:
-            WATCH.add(s["symbol"])
-    print(f"{len(WATCH)} coin izleniyor")
-
-
 def fetch_snapshot():
-    """Tüm coinlerin anlık fiyat + 24s hacmi (tek istek)."""
-    global USE_MINI
-    params = {"type": "MINI"} if USE_MINI else None
-    status, data = api("/api/v3/ticker/24hr", params)
-    if data is None and USE_MINI and status not in (418, 429):
-        USE_MINI = False
-        status, data = api("/api/v3/ticker/24hr")
-    if data is None:
-        return status, None
+    """(durum_kodu, {sembol: (fiyat, 24s_usdt_hacim)}) döndürür."""
+    try:
+        r = requests.get(HOST + TICKER_PATH, params=TICKER_PARAMS, timeout=15)
+    except requests.RequestException as e:
+        print("hata", e)
+        return 0, None
+    if r.status_code != 200:
+        print("HTTP", r.status_code, TICKER_PATH)
+        if r.status_code in (403, 451):
+            print("bu sunucunun IP'si Bitget tarafından engelli")
+        return r.status_code, None
+    try:
+        body = r.json()
+    except ValueError:
+        print("json okunamadı")
+        return 0, None
+    if body.get("code") != "00000":
+        print("API hatası:", body.get("code"), body.get("msg"))
+        return 0, None
     out = {}
-    for t in data:
+    for t in body.get("data", []):
         try:
-            out[t["symbol"]] = (float(t["lastPrice"]), float(t["quoteVolume"]))
-        except (KeyError, ValueError):
+            vol = t.get("usdtVolume") or t.get("quoteVolume")
+            out[t["symbol"]] = (float(t["lastPr"]), float(vol))
+        except (KeyError, TypeError, ValueError):
             continue
-    return status, out
+    return 200, out
+
+
+def refresh_symbols(snap):
+    WATCH.clear()
+    for sym, (_, vol24) in snap.items():
+        if keep(sym) and vol24 >= MIN_24H_VOL:
+            WATCH.add(sym)
+    print(f"{len(WATCH)} Bitget vadeli coin izleniyor")
 
 
 def evaluate(hist, now):
@@ -200,7 +193,7 @@ def alert(sym, vol24, price, pct, vol, mult):
     save_state()
     t = datetime.now(TZ).strftime("%H:%M:%S")
     send(
-        f"⚡ ANLIK PUMP {sym}\n"
+        f"⚡ ANLIK PUMP {sym} (Bitget Vadeli)\n"
         f"Saat: {t}\n"
         f"Fiyat: {fmt(price)}\n"
         f"Son {WINDOW_SEC} sn: +{pct:.1f}%\n"
@@ -217,19 +210,19 @@ def main():
     if not snap:
         print("Borsa verisi alınamadı")
         return
-    refresh_symbols({s: v[1] for s, v in snap.items()})
+    refresh_symbols(snap)
     last_refresh = time.time()
 
     end = time.time() + LOOP_MINUTES * 60
     fails = 0
-    print(f"canlı tarama başladı: {POLL_SEC} sn aralık, {WINDOW_SEC} sn pencere")
+    print(f"canlı tarama başladı: {POLL_SEC} sn aralık, {WINDOW_SEC} sn pencere", flush=True)
     while time.time() < end:
         t0 = time.time()
         status, snap = fetch_snapshot()
         if snap is None:
             fails += 1
             wait = 60 if status in (418, 429) else min(5 * fails, 30)
-            print(f"veri alınamadı ({status}), {wait} sn bekleniyor")
+            print(f"veri alınamadı ({status}), {wait} sn bekleniyor", flush=True)
             time.sleep(wait)
             continue
         fails = 0
@@ -241,7 +234,7 @@ def main():
                 print("sinyal hatası", e)
 
         if time.time() - last_refresh > 1800:
-            refresh_symbols({s: v[1] for s, v in snap.items()})
+            refresh_symbols(snap)
             last_refresh = time.time()
 
         time.sleep(max(0.0, POLL_SEC - (time.time() - t0)))
