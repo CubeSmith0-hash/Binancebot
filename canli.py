@@ -11,10 +11,10 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))  # ne kadar süre çalışsın
 POLL_SEC = 1               # kaç saniyede bir taransın
-WINDOW_SEC = 10            # son kaç saniyeye bakılsın
-MIN_PCT = 1.5              # pencere içindeki dipten en az % kaç yükseliş
+WINDOW_SEC = 600           # son kaç saniyeye bakılsın
+MIN_PCT = 10.0             # pencere içindeki dipten en az % kaç yükseliş
 VOL_MULT = 5.0             # pencere hacmi, normal hacmin en az kaç katı olmalı
-VOL_MAX = 30.0             # pencere hacmi, normal hacmin en fazla kaç katı olabilir
+VOL_MAX = 100.0            # pencere hacmi, normal hacmin en fazla kaç katı olabilir
 MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USDT hacim olmalı
 MIN_24H_VOL = 50_000       # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
 COOLDOWN_MIN = 5           # aynı coin için tekrar sinyal bekleme süresi (dk)
