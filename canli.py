@@ -93,8 +93,11 @@ def load_state():
             with open(STATE_FILE, "r") as f:
                 data = json.load(f)
             limit = time.time() - COOLDOWN_MIN * 60
-            return {k: v for k, v in data.items() if v > limit}
-        except (OSError, ValueError):
+            return {
+                k: v for k, v in data.items()
+                if isinstance(v, (int, float)) and v > limit
+            }
+        except (OSError, ValueError, AttributeError):
             pass
     return {}
 
@@ -244,4 +247,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
+    
