@@ -32,6 +32,7 @@ NEED = 5                   # üst üste kaç işlem TP olursa kombinasyon onayla
 MIN_RATE = 0.9             # onaylı kombinasyon son 10 işlemde en az bu oranda TP olmalı
 
 REPORT_MIN = 30            # kaç dakikada bir rapor
+SAVE_SEC = 300             # kaç saniyede bir state dosyasına yazılsın
 MIN_TRADES = 5             # rapora girmek için en az işlem sayısı
 TOP_N = 10                 # raporda kaç kombinasyon gösterilsin
 
@@ -40,7 +41,28 @@ SL_PRICE = SL_MARGIN / LEVERAGE
 FEE_MARGIN = FEE_PCT * LEVERAGE       # komisyonun margin'e etkisi (%)
 HISTORY_SEC = max(WINDOWS) + 30
 TZ = timezone(timedelta(hours=3))
-STATE_FILE = "canli_state.json"
+
+# State dosyası: workflow "data" klasörünü state branch'inden hazırlar
+STATE_FILE = os.environ.get("STATE_FILE", "data/canli_state.json")
+OLD_STATE_FILE = "canli_state.json"   # eski konum (yedek olarak okunur)
+
+# ---- Son araştırma raporundan devam etmek için başlangıç verisi ----
+# Bu veri state dosyasına sadece BİR KEZ uygulanır ("seeded" bayrağı ile).
+SEED_TOTAL = 9285
+# kombinasyon: (işlem, TP, SL, süre, işlem başı ort. kâr %)
+SEED_STATS = {
+    "100|4.0|50.0": (13, 12, 1, 0, 21.4),
+    "250|4.0|50.0": (9, 8, 1, 0, 18.7),
+    "250|4.0|15.0": (15, 13, 2, 0, 16.9),
+    "100|4.0|30.0": (15, 13, 2, 0, 16.9),
+    "60|3.0|30.0": (12, 10, 1, 1, 16.1),
+    "60|3.0|20.0": (18, 15, 2, 1, 15.5),
+    "250|4.0|5.0": (13, 11, 2, 0, 15.3),
+    "60|3.0|15.0": (17, 14, 2, 1, 14.8),
+    "100|5.0|30.0": (12, 10, 2, 0, 14.3),
+    "100|5.0|20.0": (12, 10, 2, 0, 14.3),
+}
+SEED_LIVE = ["20|4.0|50.0", "60|2.0|100.0"]   # onaylı kombinasyonlar
 
 HOST = "https://api.bitget.com"
 TICKER_PATH = "/api/v2/mix/market/tickers"
@@ -70,6 +92,7 @@ LIVE = set()     # onaylanmış (gerçek sinyal veren) kombinasyonlar
 BANNED = set()   # onayı düşmüş, bir daha taranmayacak kombinasyonlar
 QUALIFIED = []   # bu turda onaylanan kombinasyonlar (tek mesajda gönderilir)
 DEMOTED = []     # bu turda onayı düşenler
+META = {"base": 0, "seeded": False}   # base: STATS'ta olmayan eski işlem sayısı
 
 
 def keep(sym):
@@ -107,25 +130,54 @@ def send(text):
 
 
 def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-            STATS.update(data.get("stats", {}))
-            RESULTS.update(data.get("results", {}))
-            LIVE.update(data.get("live", []))
-            BANNED.update(data.get("banned", []))
-        except (OSError, ValueError, AttributeError):
-            pass
+    path = STATE_FILE if os.path.exists(STATE_FILE) else OLD_STATE_FILE
+    if not os.path.exists(path):
+        print("state dosyası yok, sıfırdan başlanıyor", flush=True)
+        return
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        STATS.update(data.get("stats", {}))
+        RESULTS.update(data.get("results", {}))
+        LIVE.update(data.get("live", []))
+        BANNED.update(data.get("banned", []))
+        META["base"] = int(data.get("base", 0))
+        META["seeded"] = bool(data.get("seeded", False))
+        print(f"state yüklendi ({path}): {len(STATS)} kombinasyon, "
+              f"{len(LIVE)} onaylı, {len(BANNED)} yasaklı", flush=True)
+    except (OSError, ValueError, AttributeError, TypeError) as e:
+        print("STATE OKUNAMADI:", e, flush=True)
+
+
+def seed_state():
+    """Son araştırma raporundaki verileri bir kez state'e işler."""
+    if META["seeded"]:
+        return
+    for k, (n, tp, sl, z, avg) in SEED_STATS.items():
+        STATS[k] = [n, tp, sl, z, round(avg * n, 2)]
+    for k in SEED_LIVE:
+        LIVE.add(k)
+        BANNED.discard(k)
+    known = sum(s[0] for s in STATS.values())
+    META["base"] = max(0, SEED_TOTAL - known)
+    META["seeded"] = True
+    print(f"seed uygulandı: {len(SEED_STATS)} kombinasyon, {len(SEED_LIVE)} onaylı, "
+          f"base={META['base']}", flush=True)
 
 
 def save_state():
     try:
-        with open(STATE_FILE, "w") as f:
+        d = os.path.dirname(STATE_FILE)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump({"stats": STATS, "results": RESULTS, "live": sorted(LIVE),
-                       "banned": sorted(BANNED)}, f)
+                       "banned": sorted(BANNED), "base": META["base"],
+                       "seeded": META["seeded"]}, f)
+        os.replace(tmp, STATE_FILE)   # yarım yazılmış dosya commit'lenmesin
     except OSError as e:
-        print("state yazılamadı", e)
+        print("state yazılamadı", e, flush=True)
 
 
 def fetch_snapshot():
@@ -332,7 +384,7 @@ def report():
         if n >= MIN_TRADES:
             rows.append((pnl / n, k, n, tp, sl, z))
     rows.sort(reverse=True)
-    total = sum(s[0] for s in STATS.values())
+    total = sum(s[0] for s in STATS.values()) + META["base"]
     head = (f"🔬 ARAŞTIRMA RAPORU\n"
             f"TP +{TP_MARGIN:.0f}% / SL -{SL_MARGIN:.0f}% margin ({LEVERAGE}x)\n"
             f"Toplam sanal işlem: {total}, açık: {len(PENDING)}\n"
@@ -353,12 +405,14 @@ def report():
 
 def main():
     load_state()
+    seed_state()
+    save_state()
     status, snap = fetch_snapshot()
     if not snap:
         print("Borsa verisi alınamadı")
         return
     refresh_symbols(snap)
-    last_refresh = last_report = time.time()
+    last_refresh = last_report = last_save = time.time()
     combos = len(WINDOWS) * len(PCTS) * len(VOLS)
     send(f"🔬 Araştırma modu başladı: {combos} kombinasyon aynı anda test ediliyor.\n"
          f"TP: margin +{TP_MARGIN:.0f}% (fiyatta +{TP_PRICE:.1f}%), "
@@ -386,8 +440,10 @@ def main():
 
         if now - last_report >= REPORT_MIN * 60:
             report()
-            save_state()
             last_report = now
+        if now - last_save >= SAVE_SEC:
+            save_state()
+            last_save = now
         if now - last_refresh > 1800:
             refresh_symbols(snap)
             last_refresh = now
@@ -400,4 +456,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
