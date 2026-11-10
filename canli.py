@@ -67,6 +67,7 @@ PENDING = []     # izlenen sanal işlemler
 STATS = {}       # kombinasyon -> [n, tp, sl, zaman, toplam_pnl_margin]
 RESULTS = {}     # kombinasyon -> [[sembol, sonuç(1=TP,2=SL,3=süre)], ...] son 20
 LIVE = set()     # onaylanmış (gerçek sinyal veren) kombinasyonlar
+BANNED = set()   # onayı düşmüş, bir daha taranmayacak kombinasyonlar
 QUALIFIED = []   # bu turda onaylanan kombinasyonlar (tek mesajda gönderilir)
 DEMOTED = []     # bu turda onayı düşenler
 
@@ -113,6 +114,7 @@ def load_state():
             STATS.update(data.get("stats", {}))
             RESULTS.update(data.get("results", {}))
             LIVE.update(data.get("live", []))
+            BANNED.update(data.get("banned", []))
         except (OSError, ValueError, AttributeError):
             pass
 
@@ -120,7 +122,8 @@ def load_state():
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({"stats": STATS, "results": RESULTS, "live": sorted(LIVE)}, f)
+            json.dump({"stats": STATS, "results": RESULTS, "live": sorted(LIVE),
+                       "banned": sorted(BANNED)}, f)
     except OSError as e:
         print("state yazılamadı", e)
 
@@ -211,6 +214,8 @@ def process(snapshot, now):
                     if mult < v:
                         continue
                     k = key_of(w, p, v)
+                    if k in BANNED:
+                        continue
                     last = LAST.get((k, sym))
                     if last and now - last < COOLDOWN_MIN * 60:
                         continue
@@ -222,6 +227,8 @@ def process(snapshot, now):
 
 def check_status(k):
     """Kombinasyon onaylanmış mı / onayı düşmeli mi kontrol eder."""
+    if k in BANNED:
+        return
     res = RESULTS.get(k, [])
     if k not in LIVE:
         last = res[-NEED:]
@@ -235,6 +242,8 @@ def check_status(k):
             tp = sum(1 for r in last if r[1] == 1)
             if tp / len(last) < MIN_RATE:
                 LIVE.discard(k)
+                BANNED.add(k)
+                PENDING[:] = [x for x in PENDING if x["key"] != k]
                 DEMOTED.append((k, tp, len(last)))
 
 
@@ -256,13 +265,15 @@ def flush_alerts():
     if DEMOTED:
         lines = [f"{label(k)}: son {n} işlemin {tp}'i TP" for k, tp, n in DEMOTED[:10]]
         send(f"⚠️ ONAYI DÜŞEN KOMBİNASYON ({len(DEMOTED)} adet)\n" + "\n".join(lines)
-             + "\nBunlardan sinyal göndermeyi durdurdum.")
+             + "\nBunlardan sinyal göndermeyi durdurdum ve bir daha taramayacağım.")
         DEMOTED.clear()
 
 
 def track(snapshot, now):
     """Açık sanal işlemleri TP, SL ya da süre dolana kadar izler."""
     for t in PENDING[:]:
+        if t not in PENDING:
+            continue
         d = snapshot.get(t["sym"])
         if not d:
             continue
@@ -325,7 +336,7 @@ def report():
     head = (f"🔬 ARAŞTIRMA RAPORU\n"
             f"TP +{TP_MARGIN:.0f}% / SL -{SL_MARGIN:.0f}% margin ({LEVERAGE}x)\n"
             f"Toplam sanal işlem: {total}, açık: {len(PENDING)}\n"
-            f"Onaylı kombinasyon: {len(LIVE)}"
+            f"Onaylı kombinasyon: {len(LIVE)}, yasaklanan: {len(BANNED)}"
             + (f" ({', '.join(label(k) for k in sorted(LIVE))})" if LIVE else "") + "\n")
     if not rows:
         send(head + f"Henüz hiçbir kombinasyon {MIN_TRADES} işleme ulaşmadı.")
@@ -389,4 +400,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+            
