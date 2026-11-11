@@ -11,8 +11,9 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))  # ne kadar süre çalışsın
 POLL_SEC = 1               # kaç saniyede bir taransın
-WINDOW_SEC = 250           # son kaç saniyeye bakılsın
+WINDOW_SEC = 100           # son kaç saniyeye bakılsın
 MIN_PCT = 4.0              # pencere içindeki dipten en az % kaç yükseliş
+MAX_PCT = 4.99             # pencere içindeki dipten en fazla % kaç yükseliş
 VOL_MULT = 50.0            # pencere hacmi, normal hacmin en az kaç katı olmalı
 VOL_MAX = 100.0            # pencere hacmi, normal hacmin en fazla kaç katı olabilir
 MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USDT hacim olmalı
@@ -157,7 +158,7 @@ def evaluate(hist, now):
     if low <= 0 or last_p <= low:
         return None
     pct = (last_p / low - 1) * 100
-    if pct < MIN_PCT:
+    if pct < MIN_PCT or pct > MAX_PCT:
         return None
     vol = last_q - pts[0][2]          # penceredeki yaklaşık USDT hacmi
     if vol < MIN_WINDOW_VOL:
