@@ -15,7 +15,6 @@ WINDOW_SEC = 100           # son kaç saniyeye bakılsın
 MIN_PCT = 4.0              # pencere içindeki dipten en az % kaç yükseliş
 MAX_PCT = 4.99             # pencere içindeki dipten en fazla % kaç yükseliş
 VOL_MULT = 50.0            # pencere hacmi, normal hacmin en az kaç katı olmalı
-VOL_MAX = 100.0            # pencere hacmi, normal hacmin en fazla kaç katı olabilir
 MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USDT hacim olmalı
 MIN_24H_VOL = 50_000       # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
 COOLDOWN_MIN = 5           # aynı coin için tekrar sinyal bekleme süresi (dk)
