@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - run: python bot.py
+      - run: python fvg_bot.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
