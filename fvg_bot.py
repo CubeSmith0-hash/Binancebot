@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -8,193 +9,291 @@ import requests
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "55"))
-POLL_SEC = 1                 # fiyat kontrol sıklığı (saniyelik)
-TF = "15m"                   # zaman dilimi
-TF_SEC = 15 * 60
-CANDLE_LIMIT = 150           # taranacak mum sayısı
-MIN_GAP_PCT = 0.3            # minimum FVG büyüklüğü (%)
-MAX_AGE_CANDLES = 96         # bundan eski FVG'ler atılır (15m x 96 = 24 saat)
-MIN_24H_VOL = 500_000        # 24s USDT hacim filtresi
-CANDLE_SLEEP = 0.08          # mum istekleri arası bekleme (rate limit)
+INTERVAL = "5m"
+INTERVAL_MIN = 5
+LOOKBACK = 20
+VOL_MULT = 5.0
+PRICE_PCT = 3.0
+MIN_AVG_VOL = 200
+MIN_24H_VOL = 50_000
 TZ = timezone(timedelta(hours=3))
-STATE_FILE = "fvg_state.json"
+MAX_LATE_MIN = 3
+AGE_GATE = True
+STATE_FILE = "sent_signals.json"
+WORKERS = 4
+REQ_SLEEP = 0.2
+
+# --- YENİ FİLTRELER ---
+REQUIRE_FVG = True    # pump mumu bullish FVG bırakmadıysa sinyal atma
+CLOSE_POS_MIN = 0.70  # kapanış, mum aralığının en az %70'inde olmalı (üstte kapanış)
+MIN_FVG_PCT = 0.5     # FVG boyutu fiyatın en az %0.5'i olmalı
+MAX_FVG_AGE_MIN = 0   # pump mumundan oluşan FVG'ye bakılır
+
+# --- SERT DÜŞÜŞTEN DÖNÜŞ (sadece long) ---
+DROP_LOOKBACK = 24    # kaç mum geriye bakılsın (24 x 5dk = 2 saat)
+MIN_DROP_PCT = 8.0    # bu aralıktaki tepe -> dip düşüşü en az %kaç olmalı
+RECENT_LOW_BARS = 6   # dip, son kaç mum içinde oluşmuş olmalı
+NEAR_LOW_PCT = 2.0    # pump mumunun açılışı dibin en fazla %kaç üstünde olmalı
 
 HOST = "https://api.bitget.com"
-TICKER_PATH = "/api/v2/mix/market/tickers"
-CANDLE_PATH = "/api/v2/mix/market/candles"
 PRODUCT = "USDT-FUTURES"
 
-# Kendi STABLES listeni buraya yapıştır
-STABLES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "GBP", "BRL"}
+STABLES = {
+    "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
+    "AEUR", "EUR", "EURI", "TRY", "GBP", "BRL", "RUB", "UAH", "XUSD",
+}
+STOCKS = {
+    "AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "GOOG", "AMZN", "META",
+    "COIN", "MSTR", "CRCL", "HOOD", "SPY", "QQQ", "NFLX", "AMD",
+    "INTC", "BABA", "PLTR", "ORCL", "AVGO", "JPM", "V", "MA", "DIS",
+    "PYPL", "UBER", "SHOP", "SQ", "TSM", "NKE", "KO", "PEP", "WMT",
+    "DELL", "IBM", "NOW", "CRM", "IREN", "BX", "HPE", "CRWD",
+}
+NON_CRYPTO = {"PAXG", "XAUT"}
+
+
+def mum_kontrol():
+    period_ms = INTERVAL_MIN * 60000
+    age_min = (time.time() * 1000 % period_ms) / 60000
+    if AGE_GATE and age_min > MAX_LATE_MIN:
+        print(f"mum yeni kapanmadı ({age_min:.1f} dk geçmiş), atlandı")
+        return False
+    return True
+
+
+def get(path, params=None):
+    for attempt in range(3):
+        try:
+            r = requests.get(HOST + path, params=params, timeout=20)
+        except requests.RequestException as e:
+            print("hata", path, e)
+            time.sleep(1)
+            continue
+        if r.status_code == 429:
+            time.sleep(1 + attempt)
+            continue
+        if r.status_code != 200:
+            print("HTTP", r.status_code, path)
+            if r.status_code in (403, 451):
+                print("bu sunucunun IP'si Bitget tarafından engelli")
+            return None
+        try:
+            body = r.json()
+        except ValueError:
+            return None
+        if body.get("code") != "00000":
+            print("API hatası:", path, body.get("code"), body.get("msg"))
+            return None
+        return body.get("data")
+    return None
+
+
+def keep(c):
+    sym = c.get("symbol", "")
+    if not sym.endswith("USDT"):
+        return False
+    if c.get("symbolStatus", "normal") != "normal":
+        return False
+    if c.get("symbolType", "perpetual") != "perpetual":
+        return False
+    base = c.get("baseCoin") or sym[:-4]
+    if base in STABLES or base in NON_CRYPTO or base in STOCKS:
+        return False
+    if base.endswith("B") and base[:-1] in STOCKS:
+        return False
+    return True
+
+
+def find_bullish_fvg(a, c):
+    """a = pump'tan 2 önceki mum, c = pump mumu.
+    Bullish FVG: c.low > a.high  -> bölge (a.high, c.low)."""
+    gap_low, gap_high = a["h"], c["l"]
+    if gap_high > gap_low:
+        return gap_low, gap_high
+    return None
+
+
+def check(symbol):
+    time.sleep(REQ_SLEEP)
+    k = get("/api/v2/mix/market/candles",
+            {"symbol": symbol, "productType": PRODUCT,
+             "granularity": INTERVAL,
+             "limit": max(LOOKBACK, DROP_LOOKBACK) + 3})
+    if not k:
+        return None
+    try:
+        # [ts, open, high, low, close, baseVol, quoteVol]
+        rows = sorted(
+            ({"ts": int(c[0]), "o": float(c[1]), "h": float(c[2]),
+              "l": float(c[3]), "c": float(c[4]), "qv": float(c[6])} for c in k),
+            key=lambda x: x["ts"])
+    except (IndexError, ValueError, TypeError):
+        return None
+    now_ms = int(time.time() * 1000)
+    closed = [r for r in rows if r["ts"] + INTERVAL_MIN * 60000 <= now_ms]
+    if len(closed) < max(LOOKBACK, DROP_LOOKBACK) + 1:
+        return None
+
+    last = closed[-1]
+    prev = closed[-LOOKBACK - 1:-1]
+    o, cl, h, l, qv = last["o"], last["c"], last["h"], last["l"], last["qv"]
+    if o <= 0 or cl <= o:
+        return None
+    pct = (cl / o - 1) * 100
+    if pct < PRICE_PCT:
+        return None
+    avg = sum(p["qv"] for p in prev) / len(prev)
+    if avg < MIN_AVG_VOL:
+        return None
+    mult = qv / avg
+    if mult < VOL_MULT:
+        return None
+
+    # Üstte kapanış: uzun üst fitil = satış baskısı, elenir
+    rng = h - l
+    if rng <= 0 or (cl - l) / rng < CLOSE_POS_MIN:
+        return None
+
+    # Sert düşüş -> dip -> dönüş: pump, bearish hareketin dibinden gelmeli
+    win = closed[-DROP_LOOKBACK - 1:-1]
+    hi_i = max(range(len(win)), key=lambda i: win[i]["h"])
+    lo_i = min(range(len(win)), key=lambda i: win[i]["l"])
+    hi_v, lo_v = win[hi_i]["h"], win[lo_i]["l"]
+    if hi_v <= 0 or lo_v <= 0:
+        return None
+    drop_pct = (hi_v - lo_v) / hi_v * 100
+    if drop_pct < MIN_DROP_PCT:
+        return None
+    if hi_i >= lo_i:                              # önce tepe, sonra dip olmalı
+        return None
+    if lo_i < len(win) - RECENT_LOW_BARS:         # dip yakın zamanda olmalı
+        return None
+    if (o - lo_v) / lo_v * 100 > NEAR_LOW_PCT:    # pump dipten başlamalı
+        return None
+
+    # FVG: pump mumunun bıraktığı boşluk
+    fvg = find_bullish_fvg(closed[-3], last)
+    if REQUIRE_FVG:
+        if not fvg:
+            return None
+        if (fvg[1] - fvg[0]) / cl * 100 < MIN_FVG_PCT:
+            return None
+
+    return symbol, cl, pct, mult, last["ts"] + INTERVAL_MIN * 60000, fvg, drop_pct, lo_v
+
+
+def fmt(p):
+    if p < 1:
+        return f"{p:.8f}".rstrip("0").rstrip(".")
+    return f"{p:.4f}".rstrip("0").rstrip(".")
+
+
+def fmt_vol(v):
+    if v >= 1e6:
+        return f"{v / 1e6:.2f}M"
+    if v >= 1e3:
+        return f"{v / 1e3:.0f}K"
+    return f"{v:.0f}"
 
 
 def send(text):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-    except requests.RequestException as e:
-        print("telegram hata:", e)
-
-
-def get_tickers():
-    try:
-        r = requests.get(HOST + TICKER_PATH,
-                         params={"productType": PRODUCT}, timeout=10)
-        data = r.json().get("data") or []
-    except (requests.RequestException, ValueError) as e:
-        print("ticker hata:", e)
-        return {}
-    out = {}
-    for t in data:
-        sym = t.get("symbol", "")
-        if not sym.endswith("USDT"):
-            continue
-        base = sym[:-4]
-        if base in STABLES:
-            continue
+    for _ in range(3):
         try:
-            price = float(t["lastPr"])
-            vol = float(t.get("usdtVolume") or t.get("quoteVolume") or 0)
-        except (KeyError, ValueError, TypeError):
-            continue
-        if vol >= MIN_24H_VOL and price > 0:
-            out[sym] = price
-    return out
-
-
-def get_candles(symbol):
-    try:
-        r = requests.get(
-            HOST + CANDLE_PATH,
-            params={"symbol": symbol, "productType": PRODUCT,
-                    "granularity": TF, "limit": CANDLE_LIMIT},
-            timeout=10,
-        )
-        rows = r.json().get("data") or []
-    except (requests.RequestException, ValueError):
-        return []
-    candles = []
-    for c in rows:
-        try:
-            candles.append((int(c[0]), float(c[2]), float(c[3])))  # ts, high, low
-        except (IndexError, ValueError, TypeError):
-            continue
-    candles.sort()
-    return candles
-
-
-def find_bullish_fvgs(candles):
-    """Kapanmış mumlardan, henüz dokunulmamış bullish FVG'leri döndürür."""
-    now_ms = int(time.time() * 1000)
-    closed = [c for c in candles if c[0] + TF_SEC * 1000 <= now_ms]
-    n = len(closed)
-    fvgs = []
-    for i in range(2, n):
-        bottom = closed[i - 2][1]   # 1. mumun high'ı
-        top = closed[i][2]          # 3. mumun low'u
-        if bottom >= top:
-            continue
-        if (top - bottom) / top * 100 < MIN_GAP_PCT:
-            continue
-        if n - i > MAX_AGE_CANDLES:
-            continue
-        # sonraki mumlar boşluğa girdiyse artık taze değil
-        touched = any(closed[j][2] <= top for j in range(i + 1, n))
-        if touched:
-            continue
-        fvgs.append({"ts": closed[i][0], "bottom": bottom, "top": top})
-    return fvgs
-
-
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE) as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            pass
-    return {"fvgs": {}, "sent": []}
-
-
-def save_state(state):
-    state["sent"] = state["sent"][-2000:]
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f)
-    except OSError as e:
-        print("state yazılamadı:", e)
-
-
-def refresh_fvgs(state, symbols):
-    for k, sym in enumerate(sorted(symbols), 1):
-        candles = get_candles(sym)
-        if candles:
-            state["fvgs"][sym] = find_bullish_fvgs(candles)
-        time.sleep(CANDLE_SLEEP)
-        if k % 25 == 0:  # tarama sırasında da saniyelik kontrol aksamasın
-            live = get_tickers()
-            if live:
-                check_prices(state, live)
-    # listeden çıkmış coinleri temizle
-    for sym in list(state["fvgs"]):
-        if sym not in symbols:
-            del state["fvgs"][sym]
-    save_state(state)
-
-
-def check_prices(state, prices):
-    for sym, price in prices.items():
-        zones = state["fvgs"].get(sym)
-        if not zones:
-            continue
-        keep = []
-        for z in zones:
-            key = f"{sym}:{z['ts']}"
-            if price < z["bottom"]:
-                continue                      # tamamen doldu, sil
-            if price <= z["top"]:
-                if key not in state["sent"]:
-                    state["sent"].append(key)
-                    t = datetime.fromtimestamp(z["ts"] / 1000, TZ)
-                    send(
-                        f"🟢 <b>{sym}</b> bullish FVG bölgesine girdi\n"
-                        f"Fiyat: {price}\n"
-                        f"FVG: {z['bottom']} - {z['top']} ({TF})\n"
-                        f"Oluşma: {t:%d.%m %H:%M}"
-                    )
-                continue                      # ilk dokunuştan sonra sil
-            keep.append(z)
-        state["fvgs"][sym] = keep
-
-
-def next_candle_close_ts():
-    now = int(time.time())
-    return (now // TF_SEC + 1) * TF_SEC + 5   # kapanıştan 5 sn sonra
+            r = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": text},
+                timeout=15,
+            )
+            print("telegram:", r.status_code)
+            if r.status_code == 429:
+                time.sleep(r.json().get("parameters", {}).get("retry_after", 3) + 1)
+                continue
+            return
+        except requests.RequestException:
+            time.sleep(2)
 
 
 def main():
-    state = load_state()
-    end = time.time() + LOOP_MINUTES * 60
-    prices = get_tickers()
-    print(f"{len(prices)} coin taranıyor...")
-    refresh_fvgs(state, set(prices))
-    next_refresh = next_candle_close_ts()
+    if not mum_kontrol():
+        return
 
-    while time.time() < end:
-        prices = get_tickers()
-        if prices:
-            check_prices(state, prices)
-            save_state(state)
-        if time.time() >= next_refresh:
-            refresh_fvgs(state, set(prices))
-            next_refresh = next_candle_close_ts()
-        time.sleep(POLL_SEC)
+    contracts = get("/api/v2/mix/market/contracts", {"productType": PRODUCT})
+    if not contracts:
+        print("Borsa verisi alınamadı")
+        return
+
+    tick = get("/api/v2/mix/market/tickers", {"productType": PRODUCT}) or []
+    vol24 = {}
+    for t in tick:
+        try:
+            vol24[t["symbol"]] = float(t.get("usdtVolume") or t.get("quoteVolume") or 0)
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    symbols = [c["symbol"] for c in contracts if keep(c)]
+    if vol24:
+        symbols = [s for s in symbols if vol24.get(s, 0) >= MIN_24H_VOL]
+    print(f"Bitget vadeli: {len(contracts)} parite var, {len(symbols)} coin taranıyor")
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        results = [r for r in ex.map(check, symbols) if r]
+    results.sort(key=lambda x: -x[2])
+    print(f"{len(results)} pump sinyali")
+
+    sent_data = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                raw = json.load(f)
+            limit = time.time() * 1000 - 6 * 3600 * 1000
+            sent_data = {
+                k: v for k, v in raw.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v > limit
+            }
+        except (OSError, ValueError, AttributeError):
+            sent_data = {}
+
+    for symbol, price, pct, mult, close_ms, fvg, drop_pct, low_v in results:
+        signal_key = f"{symbol}_{close_ms}"
+        if signal_key in sent_data:
+            continue
+
+        t = datetime.now(TZ).strftime("%H:%M")
+        late = int((time.time() * 1000 - close_ms) / 60000)
+        note = f"\n(Bildirim {late} dk gecikmeli geldi)" if late > 1 else ""
+
+        if fvg:
+            lo, hi = fvg
+            fvg_txt = (
+                f"\n🟩 Bullish FVG ({INTERVAL}): {fmt(lo)} - {fmt(hi)}"
+                f"\nGeri çekilme bölgesi: FVG'nin içi"
+                f"\nİptal seviyesi: {fmt(lo)} altı kapanış"
+            )
+        else:
+            fvg_txt = ""
+
+        send(
+            f"🚀 LONG DİP DÖNÜŞ {symbol} (Bitget Vadeli)\n"
+            f"Saat: {t}\n"
+            f"Fiyat: {fmt(price)}\n"
+            f"Önceki düşüş: -{drop_pct:.1f}% (dip: {fmt(low_v)})\n"
+            f"{INTERVAL_MIN} dk: +{pct:.1f}%\n"
+            f"Hacim: {mult:.1f}x ortalama\n"
+            f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}"
+            f"{fvg_txt}"
+            f"{note}"
+        )
+
+        sent_data[signal_key] = close_ms
+        time.sleep(0.5)
+
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(sent_data, f)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
     main()
-      
+    
