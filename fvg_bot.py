@@ -23,17 +23,19 @@ STATE_FILE = "sent_signals.json"
 WORKERS = 4
 REQ_SLEEP = 0.2
 
-# --- YENİ FİLTRELER ---
-REQUIRE_FVG = True    # pump mumu bullish FVG bırakmadıysa sinyal atma
-CLOSE_POS_MIN = 0.70  # kapanış, mum aralığının en az %70'inde olmalı (üstte kapanış)
-MIN_FVG_PCT = 0.5     # FVG boyutu fiyatın en az %0.5'i olmalı
-MAX_FVG_AGE_MIN = 0   # pump mumundan oluşan FVG'ye bakılır
+# --- FİLTRELER ---
+REQUIRE_FVG = True
+CLOSE_POS_MIN = 0.70
+MIN_FVG_PCT = 0.5
 
 # --- SERT DÜŞÜŞTEN DÖNÜŞ (sadece long) ---
-DROP_LOOKBACK = 24    # kaç mum geriye bakılsın (24 x 5dk = 2 saat)
-MIN_DROP_PCT = 8.0    # bu aralıktaki tepe -> dip düşüşü en az %kaç olmalı
-RECENT_LOW_BARS = 6   # dip, son kaç mum içinde oluşmuş olmalı
-NEAR_LOW_PCT = 2.0    # pump mumunun açılışı dibin en fazla %kaç üstünde olmalı
+DROP_LOOKBACK = 24
+MIN_DROP_PCT = 8.0
+RECENT_LOW_BARS = 6
+NEAR_LOW_PCT = 2.0
+
+# --- SÜREKLİ ÇALIŞMA ---
+RUN_MINUTES = 345     # workflow timeout'tan (355 dk) kısa olmalı
 
 HOST = "https://api.bitget.com"
 PRODUCT = "USDT-FUTURES"
@@ -106,7 +108,7 @@ def keep(c):
 
 def find_bullish_fvg(a, c):
     """a = pump'tan 2 önceki mum, c = pump mumu.
-    Bullish FVG: c.low > a.high  -> bölge (a.high, c.low)."""
+    Bullish FVG: c.low > a.high -> bölge (a.high, c.low)."""
     gap_low, gap_high = a["h"], c["l"]
     if gap_high > gap_low:
         return gap_low, gap_high
@@ -115,23 +117,24 @@ def find_bullish_fvg(a, c):
 
 def check(symbol):
     time.sleep(REQ_SLEEP)
+    need = max(LOOKBACK, DROP_LOOKBACK)
     k = get("/api/v2/mix/market/candles",
             {"symbol": symbol, "productType": PRODUCT,
-             "granularity": INTERVAL,
-             "limit": max(LOOKBACK, DROP_LOOKBACK) + 3})
+             "granularity": INTERVAL, "limit": need + 3})
     if not k:
         return None
     try:
         # [ts, open, high, low, close, baseVol, quoteVol]
         rows = sorted(
             ({"ts": int(c[0]), "o": float(c[1]), "h": float(c[2]),
-              "l": float(c[3]), "c": float(c[4]), "qv": float(c[6])} for c in k),
+              "l": float(c[3]), "c": float(c[4]), "qv": float(c[6])}
+             for c in k),
             key=lambda x: x["ts"])
     except (IndexError, ValueError, TypeError):
         return None
     now_ms = int(time.time() * 1000)
     closed = [r for r in rows if r["ts"] + INTERVAL_MIN * 60000 <= now_ms]
-    if len(closed) < max(LOOKBACK, DROP_LOOKBACK) + 1:
+    if len(closed) < need + 1:
         return None
 
     last = closed[-1]
@@ -149,12 +152,12 @@ def check(symbol):
     if mult < VOL_MULT:
         return None
 
-    # Üstte kapanış: uzun üst fitil = satış baskısı, elenir
+    # Üstte kapanış
     rng = h - l
     if rng <= 0 or (cl - l) / rng < CLOSE_POS_MIN:
         return None
 
-    # Sert düşüş -> dip -> dönüş: pump, bearish hareketin dibinden gelmeli
+    # Sert düşüş -> dip -> dönüş
     win = closed[-DROP_LOOKBACK - 1:-1]
     hi_i = max(range(len(win)), key=lambda i: win[i]["h"])
     lo_i = min(range(len(win)), key=lambda i: win[i]["l"])
@@ -164,14 +167,14 @@ def check(symbol):
     drop_pct = (hi_v - lo_v) / hi_v * 100
     if drop_pct < MIN_DROP_PCT:
         return None
-    if hi_i >= lo_i:                              # önce tepe, sonra dip olmalı
+    if hi_i >= lo_i:
         return None
-    if lo_i < len(win) - RECENT_LOW_BARS:         # dip yakın zamanda olmalı
+    if lo_i < len(win) - RECENT_LOW_BARS:
         return None
-    if (o - lo_v) / lo_v * 100 > NEAR_LOW_PCT:    # pump dipten başlamalı
+    if (o - lo_v) / lo_v * 100 > NEAR_LOW_PCT:
         return None
 
-    # FVG: pump mumunun bıraktığı boşluk
+    # FVG
     fvg = find_bullish_fvg(closed[-3], last)
     if REQUIRE_FVG:
         if not fvg:
@@ -179,7 +182,8 @@ def check(symbol):
         if (fvg[1] - fvg[0]) / cl * 100 < MIN_FVG_PCT:
             return None
 
-    return symbol, cl, pct, mult, last["ts"] + INTERVAL_MIN * 60000, fvg, drop_pct, lo_v
+    return (symbol, cl, pct, mult, last["ts"] + INTERVAL_MIN * 60000,
+            fvg, drop_pct, lo_v)
 
 
 def fmt(p):
@@ -295,5 +299,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    
+    end = time.time() + RUN_MINUTES * 60
+    period = INTERVAL_MIN * 60
+    print("bot başladı")
+    while True:
+        wait = period - (time.time() % period) + 5  # mum kapanışından 5 sn sonra
+        if time.time() + wait > end:
+            break
+        time.sleep(wait)
+        try:
+            main()
+        except Exception as e:
+            print("hata:", e)
+    print("süre doldu, workflow yeniden başlayacak")
