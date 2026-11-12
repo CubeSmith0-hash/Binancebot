@@ -19,7 +19,7 @@ REQ_SLEEP = 0.2
 
 # --- DÜŞÜŞ + FVG AYARLARI ---
 DROP_LOOKBACK = 32    # kaç mum geriye bakılsın (32 x 15dk = 8 saat)
-MIN_DROP_PCT = 8.0    # tepe -> dip düşüşü en az %kaç olmalı
+MIN_DROP_PCT = 16.0    # tepe -> dip düşüşü en az %kaç olmalı
 MIN_FVG_PCT = 0.2     # FVG boyutu fiyatın en az %kaçı olmalı
 
 # --- ÇALIŞMA ---
