@@ -9,8 +9,8 @@ import requests
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-INTERVAL = "5m"
-INTERVAL_MIN = 5
+INTERVAL = "15m"
+INTERVAL_MIN = 15
 MIN_24H_VOL = 50_000
 TZ = timezone(timedelta(hours=3))
 STATE_FILE = "sent_signals.json"
