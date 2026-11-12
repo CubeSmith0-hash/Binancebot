@@ -17,13 +17,13 @@ STATE_FILE = "sent_signals.json"
 WORKERS = 4
 REQ_SLEEP = 0.2
 
-# --- DÜŞÜŞ + FVG AYARLARI ---
+# --- DÜŞÜŞ AYARLARI ---
 DROP_LOOKBACK = 32    # kaç mum geriye bakılsın (32 x 15dk = 8 saat)
-MIN_DROP_PCT = 16.0    # tepe -> dip düşüşü en az %kaç olmalı
-MIN_FVG_PCT = 0.2     # FVG boyutu fiyatın en az %kaçı olmalı
+MIN_DROP_PCT = 16.0   # tepe -> dip düşüşü en az %kaç olmalı
+RECENT_LOW_BARS = 4   # dip son kaç mum içinde olmalı (4 x 15dk = 1 saat)
 
 # --- ÇALIŞMA ---
-SCAN_SECONDS = 120    # kaç saniyede bir taransın
+SCAN_SECONDS = 60     # kaç saniyede bir taransın
 RUN_MINUTES = 345     # workflow timeout'tan (355 dk) kısa olmalı
 
 HOST = "https://api.bitget.com"
@@ -101,40 +101,26 @@ def check(symbol):
             key=lambda x: x["ts"])
     except (IndexError, ValueError, TypeError):
         return None
-    if len(rows) < DROP_LOOKBACK + 2:
+
+    if len(rows) < DROP_LOOKBACK:
         return None
 
-    last = rows[-1]          # şu anki (oluşmakta olan) mum
-    hist = rows[:-1]         # kapanmış mumlar
-
-    # 1) Sert düşüş: önce tepe, sonra dip
-    win = hist[-DROP_LOOKBACK:]
-    off = len(hist) - len(win)
+    last = rows[-1]                         # şu an oluşan mum dahil
+    win = rows[-DROP_LOOKBACK:]
     hi_i = max(range(len(win)), key=lambda i: win[i]["h"])
     lo_i = min(range(len(win)), key=lambda i: win[i]["l"])
     hi_v, lo_v = win[hi_i]["h"], win[lo_i]["l"]
-    if hi_v <= 0 or lo_v <= 0 or hi_i >= lo_i:
+    if hi_v <= 0 or lo_v <= 0 or hi_i >= lo_i:   # önce tepe, sonra dip
         return None
     drop_pct = (hi_v - lo_v) / hi_v * 100
     if drop_pct < MIN_DROP_PCT:
         return None
+    if lo_i < len(win) - 1 - RECENT_LOW_BARS:    # dip yakın zamanda olmalı
+        return None
 
-    # 2) Dipten sonra oluşmuş bullish FVG'ler (en yeniden eskiye)
-    for i in range(len(hist) - 1, off + lo_i + 1, -1):
-        a, c = hist[i - 2], hist[i]
-        gap_lo, gap_hi = a["h"], c["l"]
-        if gap_hi <= gap_lo:
-            continue
-        if (gap_hi - gap_lo) / c["c"] * 100 < MIN_FVG_PCT:
-            continue
-        # FVG'den sonra fiyat bölgeye hiç girmemiş olmalı (ilk temas)
-        if any(x["l"] <= gap_hi for x in hist[i + 1:]):
-            continue
-        # 3) Şu anki mum bölgeye girdi ve bölgenin altında kapanmadı
-        if last["l"] <= gap_hi and last["c"] >= gap_lo:
-            return (symbol, last["c"], (gap_lo, gap_hi), c["ts"],
-                    drop_pct, lo_v)
-    return None
+    bounce_pct = (last["c"] / lo_v - 1) * 100
+    return (symbol, last["c"], drop_pct, hi_v, lo_v, bounce_pct,
+            win[hi_i]["ts"])
 
 
 def fmt(p):
@@ -189,7 +175,7 @@ def main():
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         results = [r for r in ex.map(check, symbols) if r]
-    results.sort(key=lambda x: -x[4])
+    results.sort(key=lambda x: -x[2])
     print(f"{len(results)} sinyal bulundu")
 
     sent_data = {}
@@ -205,20 +191,19 @@ def main():
         except (OSError, ValueError, AttributeError):
             sent_data = {}
 
-    for symbol, price, fvg, fvg_ts, drop_pct, low_v in results:
-        key = f"{symbol}_{fvg_ts}"
+    for (symbol, price, drop_pct, hi_v, lo_v,
+         bounce_pct, high_ts) in results:
+        key = f"{symbol}_{high_ts}"         # aynı tepe için tek mesaj
         if key in sent_data:
             continue
 
-        lo, hi = fvg
-        olusma = datetime.fromtimestamp(fvg_ts / 1000, TZ).strftime("%d.%m %H:%M")
+        t = datetime.now(TZ).strftime("%H:%M")
         send(
-            f"🟢 {symbol} bullish FVG bölgesine girdi\n"
+            f"🟢 {symbol} FVG LONG PUMP sinyali\n"
+            f"Saat: {t}\n"
             f"Fiyat: {fmt(price)}\n"
-            f"FVG: {fmt(lo)} - {fmt(hi)} ({INTERVAL})\n"
-            f"Oluşma: {olusma}\n"
-            f"Önceki düşüş: -{drop_pct:.1f}% (dip: {fmt(low_v)})\n"
-            f"İptal seviyesi: {fmt(lo)} altı kapanış\n"
+            f"Tepeden düşüş: -{drop_pct:.1f}% ({fmt(hi_v)} -> {fmt(lo_v)})\n"
+            f"Dipten yükseliş: +{bounce_pct:.1f}%\n"
             f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}"
         )
 
