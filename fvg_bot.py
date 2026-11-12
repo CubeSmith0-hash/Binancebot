@@ -22,6 +22,11 @@ DROP_LOOKBACK = 32    # kaç mum geriye bakılsın (32 x 15dk = 8 saat)
 MIN_DROP_PCT = 16.0   # tepe -> dip düşüşü en az %kaç olmalı
 RECENT_LOW_BARS = 4   # dip son kaç mum içinde olmalı (4 x 15dk = 1 saat)
 
+# --- FVG AYARLARI ---
+MIN_GAP_PCT = 0.3     # bullish FVG boşluğu en az %kaç olmalı
+USE_FORMING = True    # True: oluşan mumu da say (hızlı ama mum kapanmadan boşluk kapanabilir)
+                      # False: sadece kapanmış mumlar (daha güvenilir, 1 mum gecikmeli)
+
 # --- ÇALIŞMA ---
 SCAN_SECONDS = 60     # kaç saniyede bir taransın
 RUN_MINUTES = 345     # workflow timeout'tan (355 dk) kısa olmalı
@@ -102,10 +107,14 @@ def check(symbol):
     except (IndexError, ValueError, TypeError):
         return None
 
+    if not USE_FORMING:
+        now_ms = int(time.time() * 1000)
+        rows = [r for r in rows if r["ts"] + INTERVAL_MIN * 60000 <= now_ms]
+
     if len(rows) < DROP_LOOKBACK:
         return None
 
-    last = rows[-1]                         # şu an oluşan mum dahil
+    last = rows[-1]
     win = rows[-DROP_LOOKBACK:]
     hi_i = max(range(len(win)), key=lambda i: win[i]["h"])
     lo_i = min(range(len(win)), key=lambda i: win[i]["l"])
@@ -118,9 +127,27 @@ def check(symbol):
     if lo_i < len(win) - 1 - RECENT_LOW_BARS:    # dip yakın zamanda olmalı
         return None
 
+    # Dipten sonra oluşan bullish FVG: mum1.high < mum3.low
+    fvg = None
+    for i in range(lo_i, len(win) - 2):
+        g_lo = win[i]["h"]
+        g_hi = win[i + 2]["l"]
+        if g_hi <= g_lo or g_lo <= 0:
+            continue
+        gap_pct = (g_hi - g_lo) / g_lo * 100
+        if gap_pct < MIN_GAP_PCT:
+            continue
+        # boşluk sonradan doldurulduysa (fiyat alt sınırın altına indiyse) geçersiz
+        if any(win[j]["l"] <= g_lo for j in range(i + 3, len(win))):
+            continue
+        fvg = (win[i]["ts"], g_lo, g_hi, gap_pct)   # en yenisi kalır
+    if not fvg:
+        return None
+
+    fvg_ts, g_lo, g_hi, gap_pct = fvg
     bounce_pct = (last["c"] / lo_v - 1) * 100
     return (symbol, last["c"], drop_pct, hi_v, lo_v, bounce_pct,
-            win[hi_i]["ts"])
+            g_lo, g_hi, gap_pct, fvg_ts)
 
 
 def fmt(p):
@@ -191,9 +218,9 @@ def main():
         except (OSError, ValueError, AttributeError):
             sent_data = {}
 
-    for (symbol, price, drop_pct, hi_v, lo_v,
-         bounce_pct, high_ts) in results:
-        key = f"{symbol}_{high_ts}"         # aynı tepe için tek mesaj
+    for (symbol, price, drop_pct, hi_v, lo_v, bounce_pct,
+         g_lo, g_hi, gap_pct, fvg_ts) in results:
+        key = f"{symbol}_{fvg_ts}"          # her FVG için tek mesaj
         if key in sent_data:
             continue
 
@@ -204,6 +231,7 @@ def main():
             f"Fiyat: {fmt(price)}\n"
             f"Tepeden düşüş: -{drop_pct:.1f}% ({fmt(hi_v)} -> {fmt(lo_v)})\n"
             f"Dipten yükseliş: +{bounce_pct:.1f}%\n"
+            f"Bullish FVG: {fmt(g_lo)} - {fmt(g_hi)} (+{gap_pct:.2f}%)\n"
             f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}"
         )
 
