@@ -18,12 +18,12 @@ WORKERS = 4
 REQ_SLEEP = 0.2
 
 # --- DÜŞÜŞ + FVG AYARLARI ---
-DROP_LOOKBACK = 36    # kaç mum geriye bakılsın (36 x 5dk = 3 saat)
+DROP_LOOKBACK = 32    # kaç mum geriye bakılsın (32 x 15dk = 8 saat)
 MIN_DROP_PCT = 8.0    # tepe -> dip düşüşü en az %kaç olmalı
-RECENT_LOW_BARS = 8   # dip son kaç mum içinde olmalı (8 x 5dk = 40 dk)
 MIN_FVG_PCT = 0.2     # FVG boyutu fiyatın en az %kaçı olmalı
 
-# --- SÜREKLİ ÇALIŞMA ---
+# --- ÇALIŞMA ---
+SCAN_SECONDS = 120    # kaç saniyede bir taransın
 RUN_MINUTES = 345     # workflow timeout'tan (355 dk) kısa olmalı
 
 HOST = "https://api.bitget.com"
@@ -101,39 +101,40 @@ def check(symbol):
             key=lambda x: x["ts"])
     except (IndexError, ValueError, TypeError):
         return None
-    now_ms = int(time.time() * 1000)
-    closed = [r for r in rows if r["ts"] + INTERVAL_MIN * 60000 <= now_ms]
-    if len(closed) < DROP_LOOKBACK:
+    if len(rows) < DROP_LOOKBACK + 2:
         return None
 
-    a, c = closed[-3], closed[-1]
-    if c["c"] <= c["o"]:                       # son mum yeşil olmalı
-        return None
+    last = rows[-1]          # şu anki (oluşmakta olan) mum
+    hist = rows[:-1]         # kapanmış mumlar
 
-    # Bullish FVG: son mumun düşüğü, 2 önceki mumun yükseğinin üstünde
-    gap_lo, gap_hi = a["h"], c["l"]
-    if gap_hi <= gap_lo:
-        return None
-    if (gap_hi - gap_lo) / c["c"] * 100 < MIN_FVG_PCT:
-        return None
-
-    # Önce sert düşüş, sonra taze dip
-    win = closed[-DROP_LOOKBACK:]
+    # 1) Sert düşüş: önce tepe, sonra dip
+    win = hist[-DROP_LOOKBACK:]
+    off = len(hist) - len(win)
     hi_i = max(range(len(win)), key=lambda i: win[i]["h"])
     lo_i = min(range(len(win)), key=lambda i: win[i]["l"])
     hi_v, lo_v = win[hi_i]["h"], win[lo_i]["l"]
-    if hi_v <= 0 or lo_v <= 0:
+    if hi_v <= 0 or lo_v <= 0 or hi_i >= lo_i:
         return None
     drop_pct = (hi_v - lo_v) / hi_v * 100
     if drop_pct < MIN_DROP_PCT:
         return None
-    if hi_i >= lo_i:                           # önce tepe, sonra dip
-        return None
-    if lo_i < len(win) - RECENT_LOW_BARS:      # dip yakın zamanda olmalı
-        return None
 
-    close_ms = c["ts"] + INTERVAL_MIN * 60000
-    return symbol, c["c"], (gap_lo, gap_hi), drop_pct, lo_v, close_ms
+    # 2) Dipten sonra oluşmuş bullish FVG'ler (en yeniden eskiye)
+    for i in range(len(hist) - 1, off + lo_i + 1, -1):
+        a, c = hist[i - 2], hist[i]
+        gap_lo, gap_hi = a["h"], c["l"]
+        if gap_hi <= gap_lo:
+            continue
+        if (gap_hi - gap_lo) / c["c"] * 100 < MIN_FVG_PCT:
+            continue
+        # FVG'den sonra fiyat bölgeye hiç girmemiş olmalı (ilk temas)
+        if any(x["l"] <= gap_hi for x in hist[i + 1:]):
+            continue
+        # 3) Şu anki mum bölgeye girdi ve bölgenin altında kapanmadı
+        if last["l"] <= gap_hi and last["c"] >= gap_lo:
+            return (symbol, last["c"], (gap_lo, gap_hi), c["ts"],
+                    drop_pct, lo_v)
+    return None
 
 
 def fmt(p):
@@ -188,15 +189,15 @@ def main():
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         results = [r for r in ex.map(check, symbols) if r]
-    results.sort(key=lambda x: -x[3])
-    print(f"{len(results)} FVG sinyali bulundu")
+    results.sort(key=lambda x: -x[4])
+    print(f"{len(results)} sinyal bulundu")
 
     sent_data = {}
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
                 raw = json.load(f)
-            limit = time.time() * 1000 - 6 * 3600 * 1000
+            limit = time.time() * 1000 - 24 * 3600 * 1000
             sent_data = {
                 k: v for k, v in raw.items()
                 if isinstance(v, (int, float)) and not isinstance(v, bool) and v > limit
@@ -204,25 +205,24 @@ def main():
         except (OSError, ValueError, AttributeError):
             sent_data = {}
 
-    for symbol, price, fvg, drop_pct, low_v, close_ms in results:
-        signal_key = f"{symbol}_{close_ms}"
-        if signal_key in sent_data:
+    for symbol, price, fvg, fvg_ts, drop_pct, low_v in results:
+        key = f"{symbol}_{fvg_ts}"
+        if key in sent_data:
             continue
 
-        t = datetime.now(TZ).strftime("%H:%M")
         lo, hi = fvg
+        olusma = datetime.fromtimestamp(fvg_ts / 1000, TZ).strftime("%d.%m %H:%M")
         send(
-            f"🚀 FVG PUMP {symbol} (Bitget Vadeli)\n"
-            f"Saat: {t}\n"
+            f"🟢 {symbol} bullish FVG bölgesine girdi\n"
             f"Fiyat: {fmt(price)}\n"
+            f"FVG: {fmt(lo)} - {fmt(hi)} ({INTERVAL})\n"
+            f"Oluşma: {olusma}\n"
             f"Önceki düşüş: -{drop_pct:.1f}% (dip: {fmt(low_v)})\n"
-            f"🟩 Bullish FVG ({INTERVAL}): {fmt(lo)} - {fmt(hi)}\n"
-            f"Geri çekilme bölgesi: FVG'nin içi\n"
             f"İptal seviyesi: {fmt(lo)} altı kapanış\n"
             f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}"
         )
 
-        sent_data[signal_key] = close_ms
+        sent_data[key] = int(time.time() * 1000)
         time.sleep(0.5)
 
     try:
@@ -234,15 +234,14 @@ def main():
 
 if __name__ == "__main__":
     end = time.time() + RUN_MINUTES * 60
-    period = INTERVAL_MIN * 60
     print("bot başladı")
     while True:
-        wait = period - (time.time() % period) + 5  # mum kapanışından 5 sn sonra
-        if time.time() + wait > end:
-            break
-        time.sleep(wait)
         try:
             main()
         except Exception as e:
             print("hata:", e)
+        wait = SCAN_SECONDS - (time.time() % SCAN_SECONDS)
+        if time.time() + wait > end:
+            break
+        time.sleep(wait)
     print("süre doldu, workflow yeniden başlayacak")
