@@ -12,13 +12,20 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))  # ne kadar süre çalışsın
 POLL_SEC = 1               # kaç saniyede bir taransın
 WINDOW_SEC = 120           # son kaç saniyeye bakılsın
-MIN_PCT = 5.0             # pencere içindeki dipten en az % kaç yükseliş
+MIN_PCT = 5.0              # pencere içindeki dipten en az % kaç yükseliş
 MAX_PCT = 100.0            # pencere içindeki dipten en fazla % kaç yükseliş
-VOL_MULT = 10.0             # pencere hacmi, normal hacmin en az kaç katı olmalı
+VOL_MULT = 10.0            # pencere hacmi, normal hacmin en az kaç katı olmalı
 MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USDT hacim olmalı
 MIN_24H_VOL = 50_000       # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
-COOLDOWN_MIN = 5           # aynı coin için tekrar sinyal bekleme süresi (dk)
+COOLDOWN_MIN = 15          # aynı coin için tekrar sinyal bekleme süresi (dk)
 HISTORY_SEC = WINDOW_SEC + 30
+
+# Kâğıt üstü takip: sinyalden kaç dk sonra sonuç mesajı atılsın
+FOLLOW_MIN = (15, 30, 60)
+FEE_PCT = 0.12             # gidiş-dönüş tahmini komisyon (%), sonuçtan düşülür
+MISSED_SEC = 600           # takip zamanı bu kadar geçtiyse (bot kapalıydı) atla
+MAX_STATS = 500            # her süre için saklanan en fazla sonuç sayısı
+
 TZ = timezone(timedelta(hours=3))
 STATE_FILE = "canli_state.json"
 
@@ -43,6 +50,8 @@ NON_CRYPTO = {"PAXG", "XAUT"}
 HISTORY = {}      # sembol -> deque[(zaman, fiyat, 24s_usdt_hacim)]
 LAST_ALERT = {}   # sembol -> son sinyal zamanı
 WATCH = set()     # taranacak semboller
+PENDING = []      # takip bekleyen sinyaller: {sym, t0, entry, done}
+STATS = {str(h): [] for h in FOLLOW_MIN}   # süre -> [net getiri %, ...]
 
 
 def keep(sym):
@@ -88,24 +97,41 @@ def send(text):
 
 
 def load_state():
+    """(alerts, pending, stats) döndürür. Eski düz formatı da okur."""
+    alerts, pending, stats = {}, [], {}
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
                 data = json.load(f)
-            limit = time.time() - COOLDOWN_MIN * 60
-            return {
-                k: v for k, v in data.items()
+            now = time.time()
+            if "alerts" in data or "pending" in data or "stats" in data:
+                raw_alerts = data.get("alerts", {})
+                pending = data.get("pending", [])
+                stats = data.get("stats", {})
+            else:
+                raw_alerts = data   # eski format: sembol -> zaman
+            limit = now - COOLDOWN_MIN * 60
+            alerts = {
+                k: v for k, v in raw_alerts.items()
                 if isinstance(v, (int, float)) and v > limit
             }
-        except (OSError, ValueError, AttributeError):
+            keep_after = now - (max(FOLLOW_MIN) * 60 + MISSED_SEC)
+            pending = [
+                p for p in pending
+                if isinstance(p, dict) and p.get("t0", 0) > keep_after
+                and "sym" in p and "entry" in p
+            ]
+        except (OSError, ValueError, AttributeError, TypeError):
             pass
-    return {}
+    return alerts, pending, stats
 
 
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump(LAST_ALERT, f)
+            json.dump(
+                {"alerts": LAST_ALERT, "pending": PENDING, "stats": STATS}, f
+            )
     except OSError as e:
         print("state yazılamadı", e)
 
@@ -193,21 +219,69 @@ def process(snapshot, now):
 
 
 def alert(sym, vol24, price, pct, vol, mult):
-    LAST_ALERT[sym] = time.time()
+    now = time.time()
+    LAST_ALERT[sym] = now
+    PENDING.append({"sym": sym, "t0": now, "entry": price, "done": []})
     save_state()
     t = datetime.now(TZ).strftime("%H:%M:%S")
+    follow = "/".join(str(h) for h in FOLLOW_MIN)
     send(
         f"⚡ ANLIK PUMP {sym} (Bitget Vadeli)\n"
         f"Saat: {t}\n"
         f"Fiyat: {fmt(price)}\n"
         f"Son {WINDOW_SEC} sn: +{pct:.1f}%\n"
         f"Bu sürede hacim: {fmt_vol(vol)} USDT ({mult:.1f}x normal)\n"
-        f"24s hacim: {fmt_vol(vol24)}"
+        f"24s hacim: {fmt_vol(vol24)}\n"
+        f"📝 Kâğıt üstü takip: {follow} dk sonra sonuç gelecek"
     )
 
 
+def track(snapshot, now):
+    """Bekleyen sinyallerin 15/30/60 dk sonraki sonucunu mesaj atar."""
+    changed = False
+    for p in list(PENDING):
+        d = snapshot.get(p["sym"])
+        for h in FOLLOW_MIN:
+            key = str(h)
+            if key in p["done"]:
+                continue
+            due = p["t0"] + h * 60
+            if now < due:
+                break
+            if now - due > MISSED_SEC:
+                p["done"].append(key)   # bot kapalıydı, bu süreyi atla
+                changed = True
+                continue
+            if not d:
+                continue
+            ret = (d[0] / p["entry"] - 1) * 100 - FEE_PCT
+            arr = STATS.setdefault(key, [])
+            arr.append(round(ret, 2))
+            del arr[:-MAX_STATS]
+            p["done"].append(key)
+            changed = True
+            avg = sum(arr) / len(arr)
+            win = 100 * sum(1 for x in arr if x > 0) / len(arr)
+            send(
+                f"📊 {p['sym']} - {h} dk sonuç\n"
+                f"Giriş: {fmt(p['entry'])} → Şimdi: {fmt(d[0])}\n"
+                f"Getiri: {ret:+.2f}% (komisyon düşülmüş)\n"
+                f"Toplam {len(arr)} sinyal ({h} dk): ort {avg:+.2f}%, kazanma %{win:.0f}"
+            )
+        if len(p["done"]) >= len(FOLLOW_MIN):
+            PENDING.remove(p)
+            changed = True
+    if changed:
+        save_state()
+
+
 def main():
-    LAST_ALERT.update(load_state())
+    alerts, pending, stats = load_state()
+    LAST_ALERT.update(alerts)
+    PENDING.extend(pending)
+    for k, v in stats.items():
+        if k in STATS and isinstance(v, list):
+            STATS[k] = v[-MAX_STATS:]
     save_state()   # dosya her durumda oluşsun
 
     status, snap = fetch_snapshot()
@@ -219,7 +293,8 @@ def main():
 
     end = time.time() + LOOP_MINUTES * 60
     fails = 0
-    print(f"canlı tarama başladı: {POLL_SEC} sn aralık, {WINDOW_SEC} sn pencere", flush=True)
+    print(f"canlı tarama başladı: {POLL_SEC} sn aralık, {WINDOW_SEC} sn pencere, "
+          f"{len(PENDING)} bekleyen takip", flush=True)
     while time.time() < end:
         t0 = time.time()
         status, snap = fetch_snapshot()
@@ -231,11 +306,17 @@ def main():
             continue
         fails = 0
 
-        for sig in sorted(process(snap, time.time()), key=lambda x: -x[3]):
+        now = time.time()
+        for sig in sorted(process(snap, now), key=lambda x: -x[3]):
             try:
                 alert(*sig)
             except Exception as e:
                 print("sinyal hatası", e)
+
+        try:
+            track(snap, now)
+        except Exception as e:
+            print("takip hatası", e)
 
         if time.time() - last_refresh > 1800:
             refresh_symbols(snap)
