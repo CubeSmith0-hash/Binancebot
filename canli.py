@@ -11,7 +11,7 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))  # ne kadar süre çalışsın
 POLL_SEC = 1               # kaç saniyede bir taransın
-WINDOW_SEC = 15           # son kaç saniyeye bakılsın
+WINDOW_SEC = 300           # son kaç saniyeye bakılsın
 MIN_PCT = 2.0              # pencere içindeki dipten en az % kaç yükseliş
 MAX_PCT = 3.0              # pencere içindeki dipten en fazla % kaç yükseliş
 VOL_MULT = 5.0            # pencere hacmi, normal hacmin en az kaç katı olmalı
