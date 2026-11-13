@@ -38,6 +38,8 @@ MIN_PCTS = (2, 3, 5)          # pencerede dipten en az % yükseliş
 VOL_MULTS = (10, 20, 30)      # pencere hacmi / normal hacim
 MIN_WINDOW_VOL = 5_000
 COOLDOWN = 15                 # dk
+HORIZONS = (5, 15, 30, 60)    # sinyalden kaç dk sonraki getiriye bakılsın
+FEE_PCT = 0.12                # gidiş-dönüş tahmini komisyon (%)
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -267,6 +269,7 @@ def main():
         for mp in MIN_PCTS:
             for vx in VOL_MULTS:
                 caught, false, late = 0, 0, []
+                fwd = {h: [] for h in HORIZONS}
                 for sym, (ts, cl, per_w, eps) in results.items():
                     pct, mult, wvol = per_w[w]
                     last = -999
@@ -276,6 +279,10 @@ def main():
                                 and i - last >= COOLDOWN):
                             sigs.append(i)
                             last = i
+                    for i in sigs:
+                        for h in HORIZONS:
+                            if i + h < len(cl):
+                                fwd[h].append((cl[i + h] / cl[i] - 1) * 100 - FEE_PCT)
                     for s, p in eps:
                         hit = next((i for i in sigs if s <= i <= p), None)
                         if hit is not None:
@@ -283,16 +290,27 @@ def main():
                             late.append((cl[hit] / cl[s] - 1) * 100)
                     inside = {i for i in sigs for s, p in eps if s <= i <= p}
                     false += len(sigs) - len(inside)
+                st = []
+                for h in HORIZONS:
+                    v = fwd[h]
+                    st.append((statistics.mean(v), 100 * sum(1 for x in v if x > 0) / len(v))
+                              if v else (0.0, 0.0))
                 table.append((w, mp, vx, caught, false / days,
-                              statistics.median(late) if late else 0))
+                              statistics.median(late) if late else 0, st))
     table.sort(key=lambda r: (-r[3], r[4]))
-    for w, mp, vx, caught, fpd, late in table:
+    for w, mp, vx, caught, fpd, late, st in table:
         print(f"{w:>4} dk  {mp:>3}%  {vx:>5}x | {caught:>3}/{total_eps:<3}   | "
               f"{fpd:>10.1f}        | {late:>6.1f}")
+    print(f"\nSinyalde LONG açılsaydı (komisyon -%{FEE_PCT} düşülmüş): ortalama getiri / kazanma oranı")
+    print("pencere  min%  hacimx | " + " | ".join(f"{h:>3} dk sonra   " for h in HORIZONS))
+    for w, mp, vx, caught, fpd, late, st in table:
+        cols = " | ".join(f"{a:>+6.2f}% / {b:>3.0f}%" for a, b in st)
+        print(f"{w:>4} dk  {mp:>3}%  {vx:>5}x | {cols}")
+    print("\nNot: ortalama > 0 ve kazanma% > 50 değilse bu ayar para kazandırmaz.")
 
     send_report()
 
 
 if __name__ == "__main__":
     main()
-                       
+                   
