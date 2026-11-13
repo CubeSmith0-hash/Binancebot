@@ -12,34 +12,36 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))
 POLL_SEC = 1
 
-# ================= ANINDA BAŞLANGIÇ SİNYALİ (YENİ) =================
-# Pump daha başlar başlamaz, kısa pencerede hacim patlaması + fiyat ivmesi.
+# ================= ANINDA BAŞLANGIÇ SİNYALİ (CİDDİ PARA AKIŞI ODAKLI) =================
 START_ENABLED = True
 # (pencere_sn, min_yükseliş_%, min_hacim_katı, min_pencere_hacmi_USDT)
+# Yalnızca devasa hacim ve para girişiyle eşleşen gerçek long pump'lar yakalanır.
 START_TIERS = [
-    (15, 1.2, 8.0, 10_000),    # çok hızlı: 15 sn'de %1.2 + 8x hacim
-    (30, 2.0, 6.0, 20_000),    # hızlı:     30 sn'de %2   + 6x hacim
-    (60, 3.0, 4.0, 30_000),    # normal:    60 sn'de %3   + 4x hacim
+    (15, 1.5, 12.0, 25_000),    # çok hızlı ve sert: 15 sn'de %1.5 + 12x hacim + 25k USDT
+    (30, 2.5, 9.0,  50_000),    # hızlı:     30 sn'de %2.5 + 9x hacim  + 50k USDT
+    (60, 4.0, 6.0,  80_000),    # normal:    60 sn'de %4.0 + 6x hacim  + 80k USDT
 ]
-START_MAX_PCT = 6.0        # pencerede bundan fazla yükselmişse geç kalınmış, atla
-START_PULLBACK_PCT = 0.4   # fiyat pencere tepesinden en fazla % bu kadar düşmüş olabilir
-START_UP_TICKS = 2         # son N saniyede fiyat düşmemiş olmalı (ivme devam ediyor)
-START_BASE_MIN_SEC = 600   # normal hacim hesabı için en az bu kadar geçmiş (10 dk)
-START_BASE_GAP_SEC = 90    # baz hesabında son 90 sn dışarıda tutulur
-START_BASE_FLOOR = 0.3     # baz hacim, 24s ortalamanın en az %30'u sayılır
-START_COOLDOWN_MIN = 10    # aynı coin için tekrar başlangıç sinyali (dk)
+START_MAX_PCT = 7.0        # Çok geç kalınmış (pencerede %7'den fazla gitmiş) coinler atlanır
+START_PULLBACK_PCT = 0.3   # Tepe noktadan maksimum bu kadar geri çekilmiş olabilir (direnç kırma anı)
+START_UP_TICKS = 3         # Son 3 saniyede fiyatın yönü yukarı veya yatay olmalı (düşmemeli)
+START_BASE_MIN_SEC = 600   # Normal hacim hesabı için en az 10 dk geçmiş olmalı
+START_BASE_GAP_SEC = 90    # Baz hesabında son 90 sn dışarıda tutulur (pump etkisini kirletmesin)
+START_BASE_FLOOR = 0.4     # Baz hacim, 24s ortalamanın en az %40'ı sayılır
+START_COOLDOWN_MIN = 20    # Aynı coin için tekrar sinyal üretme süresi (20 dk spam koruması)
 START_LOG_FILE = "start_log.jsonl"
-# açık pozisyon (OI) = gerçek para girişi göstergesi
+
+# Ciddi para girişi filtresi (OI = Açık Pozisyon)
 START_OI_WINDOW_SEC = 45   # OI değişimine bakılan süre
-START_OI_PCT = 0.5         # bu kadar % artmışsa "güçlü" sinyal (💰)
-START_REQUIRE_OI = True    # fiyat + hacim + OI aynı anda artmalı (False: OI'siz de sinyal gelir)
+START_OI_PCT = 2.5         # OI en az %2.5 artmalı (ciddi kaldıraçlı pozisyon girişi)
+START_OI_MIN_USDT = 120_000# En az 120,000 USDT'lik yeni net borç/pozisyon açılmış olmalı
+START_REQUIRE_OI = True    # OI şartı sağlanmazsa asla sinyal atılmaz
 
 # ---- Genel ----
-MIN_24H_VOL = 500_000      # 24s hacmi bunun altındaki coinler taranmaz
+MIN_24H_VOL = 1_000_000    # Çöp coinleri elemek için günlük minimum 1M USDT hacim şartı
 
 HISTORY_SEC = max([t[0] for t in START_TIERS] + [START_OI_WINDOW_SEC]) + 30
-COARSE_STEP = 10           # hacim tabanı örnekleme aralığı (sn)
-SLOW_SEC = 1800            # normal hacim tabanı için 30 dk geçmiş
+COARSE_STEP = 10           # Hacim tabanı örnekleme aralığı (sn)
+SLOW_SEC = 1800            # Normal hacim tabanı için 30 dk geçmiş
 TZ = timezone(timedelta(hours=3))
 STATE_FILE = "canli_state.json"
 
@@ -63,7 +65,7 @@ STOCKS = {
 NON_CRYPTO = {"PAXG", "XAUT"}
 
 HISTORY = {}      # sembol -> deque[(zaman, fiyat, 24s_hacim, açık_pozisyon)]
-SLOW = {}         # sembol -> deque[(zaman, 24s_hacim)] (10 sn aralıklı, 30 dk)
+SLOW = {}         # sembol -> deque[(zaman, 24s_hacim)]
 LAST_ALERT = {}   # "S:sembol" -> son sinyal zamanı
 WATCH = set()
 
@@ -77,7 +79,7 @@ def keep(sym):
     if base.endswith("B") and base[:-1] in STOCKS:
         return False
     if base.startswith("USD") and len(base) == 6 and base[3:] in FIAT:
-        return False   # USDBRL, USDJPY gibi döviz pariteleri
+        return False
     return True
 
 
@@ -152,8 +154,6 @@ def fetch_snapshot():
         return 0, None
     if r.status_code != 200:
         print("HTTP", r.status_code, TICKER_PATH)
-        if r.status_code in (403, 451):
-            print("bu sunucunun IP'si Bitget tarafından engelli")
         return r.status_code, None
     try:
         body = r.json()
@@ -183,11 +183,10 @@ def refresh_symbols(snap):
     for sym, d in snap.items():
         if keep(sym) and d[1] >= MIN_24H_VOL:
             WATCH.add(sym)
-    print(f"{len(WATCH)} Bitget vadeli coin izleniyor")
+    print(f"{len(WATCH)} Bitget vadeli coin izleniyor (Filtre: min 1M 24s hacim)")
 
 
 def window(hist, now, sec):
-    """Son 'sec' saniyedeki noktalar (eskiden yeniye)."""
     out = []
     for p in reversed(hist):
         if p[0] < now - sec:
@@ -197,14 +196,11 @@ def window(hist, now, sec):
     return out
 
 
-# ------------------------------------------------- ANINDA BAŞLANGIÇ (YENİ)
-
 def base_rate(slow, now, vol24):
-    """Normal hacim akışı (USDT/sn): son 30 dk, son 90 sn hariç."""
     day_rate = vol24 / 86400.0
     floor = day_rate * START_BASE_FLOOR
     if len(slow) < 2 or now - slow[0][0] < START_BASE_MIN_SEC:
-        return max(day_rate, 0.0)   # yeterli geçmiş yok, 24s ortalaması
+        return max(day_rate, 0.0)
     old = slow[0]
     recent = None
     for p in reversed(slow):
@@ -218,14 +214,18 @@ def base_rate(slow, now, vol24):
 
 
 def oi_change(hist, now):
-    """Son START_OI_WINDOW_SEC içinde açık pozisyon % değişimi (yoksa None)."""
     pts = window(hist, now, START_OI_WINDOW_SEC)
     if len(pts) < 3 or now - pts[0][0] < START_OI_WINDOW_SEC * 0.7:
         return None
     o0, o1 = pts[0][3], pts[-1][3]
     if not o0 or not o1 or o0 <= 0:
         return None
-    return (o1 / o0 - 1) * 100
+    o_mid = pts[len(pts) // 2][3]
+    if o_mid is None or not (o0 <= o_mid <= o1):
+        return None
+    pct = (o1 / o0 - 1) * 100
+    usdt = (o1 - o0) * pts[-1][1]
+    return pct, usdt
 
 
 def start_eval(hist, slow, now, vol24):
@@ -234,7 +234,6 @@ def start_eval(hist, slow, now, vol24):
     if rate <= 0:
         return None
 
-    # ivme: son START_UP_TICKS saniyede fiyat düşmemiş olmalı
     recent = window(hist, now, START_UP_TICKS + 1)
     if len(recent) >= 2 and recent[-1][1] < recent[0][1]:
         return None
@@ -252,7 +251,7 @@ def start_eval(hist, slow, now, vol24):
         if pct < min_pct or pct > START_MAX_PCT:
             continue
         if (high / last_p - 1) * 100 > START_PULLBACK_PCT:
-            continue   # tepeden dönmüş
+            continue
         vol = last_q - pts[0][2]
         if vol < min_vol:
             continue
@@ -265,8 +264,10 @@ def start_eval(hist, slow, now, vol24):
             best = cand
     if best is None:
         return None
+    
     oi = oi_change(hist, now)
-    if START_REQUIRE_OI and (oi is None or oi < START_OI_PCT):
+    if START_REQUIRE_OI and (
+            oi is None or oi[0] < START_OI_PCT or oi[1] < START_OI_MIN_USDT):
         return None
     return best + (oi,)
 
@@ -275,21 +276,16 @@ def alert_start(sym, vol24, sec, price, pct, vol, mult, oi):
     LAST_ALERT["S:" + sym] = time.time()
     save_state()
     t = datetime.now(TZ).strftime("%H:%M:%S")
-    if oi is None:
-        oi_line = "Açık pozisyon: veri yok"
-        head = "⚡ ANLIK PUMP"
-    elif oi >= START_OI_PCT:
-        oi_line = f"💰 Açık pozisyon {START_OI_WINDOW_SEC} sn: {oi:+.2f}% (para girişi VAR)"
-        head = "⚡ ANLIK PUMP"
-    else:
-        oi_line = f"Açık pozisyon {START_OI_WINDOW_SEC} sn: {oi:+.2f}% (para girişi yok, zayıf)"
-        head = "⚡ ANLIK PUMP"
+    oi_line = (f"💰 Ciddi Para Girişi ({START_OI_WINDOW_SEC} sn): "
+               f"+{fmt_vol(max(oi[1], 0))} USDT yeni pozisyon "
+               f"(OI {oi[0]:+.2f}%)")
+    head = "🚀 SERT LONG PUMP"
     send(
         f"{head} {sym} (Bitget Vadeli)\n"
         f"Saat: {t}\n"
         f"Fiyat: {fmt(price)}\n"
         f"Son {sec} sn: +{pct:.2f}%\n"
-        f"Hacim: {fmt_vol(vol)} USDT ({mult:.1f}x normal)\n"
+        f"Hacim Patlaması: {fmt_vol(vol)} USDT ({mult:.1f}x normal)\n"
         f"{oi_line}\n"
         f"24s hacim: {fmt_vol(vol24)}"
     )
@@ -299,14 +295,14 @@ def alert_start(sym, vol24, sec, price, pct, vol, mult, oi):
                 "t": int(time.time()), "sym": sym, "price": price,
                 "sec": sec, "pct": round(pct, 3), "vol": round(vol),
                 "mult": round(mult, 2),
-                "oi": None if oi is None else round(oi, 3),
+                "oi_pct": None if oi is None else round(oi[0], 3),
+                "oi_usdt": None if oi is None else round(oi[1]),
             }, ensure_ascii=False) + "\n")
     except OSError:
         pass
 
 
 def process(snapshot, now):
-    """Geçmişi günceller, şartı sağlayan coinleri döner."""
     starts = []
     for sym in WATCH:
         d = snapshot.get(sym)
@@ -345,7 +341,7 @@ def main():
 
     end = time.time() + LOOP_MINUTES * 60
     fails = 0
-    print(f"canlı tarama başladı: {POLL_SEC} sn aralık", flush=True)
+    print(f"Ciddi para akışı odaklı canlı tarama başladı: {POLL_SEC} sn aralık", flush=True)
     while time.time() < end:
         t0 = time.time()
         status, snap = fetch_snapshot()
