@@ -1,57 +1,100 @@
-import json
+"""
+Bitget USDT vadeli tüm coinlerin 1 dk mumlarını çeker, gerçek pump'ları bulur,
+pump hacim verisini pumps.csv'ye yazar ve ayar kombinasyonlarını karşılaştırır.
+
+Kullanım:  python tara_pump.py
+Ayarlar aşağıda.
+"""
+import builtins
+import csv
+import html
 import os
+import statistics
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 import requests
 
-TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-
-LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))  # ne kadar süre çalışsın
-POLL_SEC = 1               # kaç saniyede bir taransın
-WINDOW_SEC = 120           # son kaç saniyeye bakılsın
-MIN_PCT = 5.0              # pencere içindeki dipten en az % kaç yükseliş
-MAX_PCT = 100.0            # pencere içindeki dipten en fazla % kaç yükseliş
-VOL_MULT = 10.0            # pencere hacmi, normal hacmin en az kaç katı olmalı
-MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USDT hacim olmalı
-MIN_24H_VOL = 50_000       # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
-COOLDOWN_MIN = 15          # aynı coin için tekrar sinyal bekleme süresi (dk)
-HISTORY_SEC = WINDOW_SEC + 30
-
-# Kâğıt üstü takip: sinyalden kaç dk sonra sonuç mesajı atılsın
-FOLLOW_MIN = (15, 30, 60)
-FEE_PCT = 0.12             # gidiş-dönüş tahmini komisyon (%), sonuçtan düşülür
-MISSED_SEC = 600           # takip zamanı bu kadar geçtiyse (bot kapalıydı) atla
-MAX_STATS = 500            # her süre için saklanan en fazla sonuç sayısı
-
+PAGES = 2             # 2 sayfa x 1000 dk = ~33 saat veri
+PUMP_PCT = 20.0       # 60 dk içinde dipten en az % kaç yükselirse "pump" sayılır
+MIN_24H_VOL = 50_000  # bu hacmin altındaki coinler atlanır
+WORKERS = 4           # eşzamanlı istek sayısı (rate limit için düşük tut)
 TZ = timezone(timedelta(hours=3))
-STATE_FILE = "canli_state.json"
 
-# Bitget USDT-M Futures
 HOST = "https://api.bitget.com"
-TICKER_PATH = "/api/v2/mix/market/tickers"
-TICKER_PARAMS = {"productType": "USDT-FUTURES"}
-
-STABLES = {
-    "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
-    "AEUR", "EUR", "EURI", "TRY", "GBP", "BRL", "RUB", "UAH", "XUSD",
-}
-STOCKS = {
-    "AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "GOOG", "AMZN", "META",
-    "COIN", "MSTR", "CRCL", "HOOD", "SPY", "QQQ", "NFLX", "AMD",
-    "INTC", "BABA", "PLTR", "ORCL", "AVGO", "JPM", "V", "MA", "DIS",
-    "PYPL", "UBER", "SHOP", "SQ", "TSM", "NKE", "KO", "PEP", "WMT",
-    "DELL", "IBM", "NOW", "CRM", "IREN", "BX", "HPE", "CRWD",
-}
+STABLES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
+           "AEUR", "EUR", "EURI", "TRY", "GBP", "BRL", "RUB", "UAH", "XUSD"}
+STOCKS = {"AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "GOOG", "AMZN", "META",
+          "COIN", "MSTR", "CRCL", "HOOD", "SPY", "QQQ", "NFLX", "AMD",
+          "INTC", "BABA", "PLTR", "ORCL", "AVGO", "JPM", "V", "MA", "DIS",
+          "PYPL", "UBER", "SHOP", "SQ", "TSM", "NKE", "KO", "PEP", "WMT",
+          "DELL", "IBM", "NOW", "CRM", "IREN", "BX", "HPE", "CRWD"}
 NON_CRYPTO = {"PAXG", "XAUT"}
 
-HISTORY = {}      # sembol -> deque[(zaman, fiyat, 24s_usdt_hacim)]
-LAST_ALERT = {}   # sembol -> son sinyal zamanı
-WATCH = set()     # taranacak semboller
-PENDING = []      # takip bekleyen sinyaller: {sym, t0, entry, done}
-STATS = {str(h): [] for h in FOLLOW_MIN}   # süre -> [net getiri %, ...]
+WINDOWS = (2, 5, 10)          # dakika
+MIN_PCTS = (2, 3, 5, 8)          # pencerede dipten en az % yükseliş
+VOL_MULTS = (10, 20, 30)      # pencere hacmi / normal hacim
+MIN_WINDOW_VOL = 5_000
+COOLDOWN = 15                 # dk
+HORIZONS = (5, 15, 30, 60)    # sinyalden kaç dk sonraki getiriye bakılsın
+FEE_PCT = 0.12                # gidiş-dönüş tahmini komisyon (%)
+
+# Senin işlem ayarın (marjin / ROE üzerinden)
+LEV = 20
+TP_ROE = 30.0
+SL_ROE = 50.0
+TPSL_HORIZON = 120            # TP/SL vurmazsa en fazla kaç dk beklenir
+HILO = {}                     # sembol -> (yüksekler, düşükler)
+
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+REPORT = []
+
+
+def print(*args, **kw):
+    """Normal print + (ilerleme satırları hariç) Telegram raporuna ekler."""
+    builtins.print(*args, **kw)
+    if not kw.get("flush"):
+        REPORT.append(" ".join(str(a) for a in args))
+
+
+def tg(method, **kwargs):
+    for _ in range(3):
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
+                              timeout=30, **kwargs)
+            if r.status_code == 429:
+                time.sleep(r.json().get("parameters", {}).get("retry_after", 3) + 1)
+                continue
+            return r.status_code
+        except requests.RequestException:
+            time.sleep(2)
+    return 0
+
+
+def send_report():
+    if not TOKEN or not CHAT_ID:
+        builtins.print("Telegram bilgisi yok, rapor gönderilmedi")
+        return
+    text = "\n".join(REPORT)
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > 3500:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur.strip():
+        chunks.append(cur)
+    for ch in chunks:
+        tg("sendMessage", data={"chat_id": CHAT_ID, "parse_mode": "HTML",
+                                "text": "<pre>" + html.escape(ch) + "</pre>"})
+        time.sleep(1)
+    if os.path.exists("pumps.csv"):
+        with open("pumps.csv", "rb") as f:
+            tg("sendDocument", data={"chat_id": CHAT_ID}, files={"document": f})
+    builtins.print("Telegram'a gönderildi")
 
 
 def keep(sym):
@@ -65,267 +108,270 @@ def keep(sym):
     return True
 
 
-def fmt(p):
-    if p < 1:
-        return f"{p:.8f}".rstrip("0").rstrip(".")
-    return f"{p:.4f}".rstrip("0").rstrip(".")
-
-
-def fmt_vol(v):
-    if v >= 1e6:
-        return f"{v / 1e6:.2f}M"
-    if v >= 1e3:
-        return f"{v / 1e3:.0f}K"
-    return f"{v:.0f}"
-
-
-def send(text):
-    for _ in range(3):
+def get(path, params):
+    for _ in range(4):
         try:
-            r = requests.post(
-                f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": text},
-                timeout=15,
-            )
-            print("telegram:", r.status_code)
+            r = requests.get(HOST + path, params=params, timeout=15)
             if r.status_code == 429:
-                time.sleep(r.json().get("parameters", {}).get("retry_after", 3) + 1)
+                time.sleep(2)
                 continue
-            return
-        except requests.RequestException:
-            time.sleep(2)
+            return r.json()
+        except (requests.RequestException, ValueError):
+            time.sleep(1)
+    return {}
 
 
-def load_state():
-    """(alerts, pending, stats) döndürür. Eski düz formatı da okur."""
-    alerts, pending, stats = {}, [], {}
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-            now = time.time()
-            if "alerts" in data or "pending" in data or "stats" in data:
-                raw_alerts = data.get("alerts", {})
-                pending = data.get("pending", [])
-                stats = data.get("stats", {})
-            else:
-                raw_alerts = data   # eski format: sembol -> zaman
-            limit = now - COOLDOWN_MIN * 60
-            alerts = {
-                k: v for k, v in raw_alerts.items()
-                if isinstance(v, (int, float)) and v > limit
-            }
-            keep_after = now - (max(FOLLOW_MIN) * 60 + MISSED_SEC)
-            pending = [
-                p for p in pending
-                if isinstance(p, dict) and p.get("t0", 0) > keep_after
-                and "sym" in p and "entry" in p
-            ]
-        except (OSError, ValueError, AttributeError, TypeError):
-            pass
-    return alerts, pending, stats
+def hm(ts):
+    return datetime.fromtimestamp(ts / 1000, TZ).strftime("%d.%m %H:%M")
 
 
-def save_state():
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(
-                {"alerts": LAST_ALERT, "pending": PENDING, "stats": STATS}, f
-            )
-    except OSError as e:
-        print("state yazılamadı", e)
+def fetch_symbol(sym):
+    end = int(time.time() * 1000)
+    rows = {}
+    for _ in range(PAGES):
+        data = get("/api/v2/mix/market/candles", {
+            "symbol": sym, "productType": "USDT-FUTURES",
+            "granularity": "1m", "endTime": end, "limit": 1000,
+        }).get("data") or []
+        if not data:
+            break
+        for c in data:
+            rows[int(c[0])] = (int(c[0]), float(c[4]), float(c[6]),
+                               float(c[2]), float(c[3]))  # ts, close, quoteVol, high, low
+        end = min(rows) - 1
+        time.sleep(0.15)
+    return sym, [rows[k] for k in sorted(rows)]
 
 
-def fetch_snapshot():
-    """(durum_kodu, {sembol: (fiyat, 24s_usdt_hacim)}) döndürür."""
-    try:
-        r = requests.get(HOST + TICKER_PATH, params=TICKER_PARAMS, timeout=15)
-    except requests.RequestException as e:
-        print("hata", e)
-        return 0, None
-    if r.status_code != 200:
-        print("HTTP", r.status_code, TICKER_PATH)
-        if r.status_code in (403, 451):
-            print("bu sunucunun IP'si Bitget tarafından engelli")
-        return r.status_code, None
-    try:
-        body = r.json()
-    except ValueError:
-        print("json okunamadı")
-        return 0, None
-    if body.get("code") != "00000":
-        print("API hatası:", body.get("code"), body.get("msg"))
-        return 0, None
-    out = {}
-    for t in body.get("data", []):
-        try:
-            vol = t.get("usdtVolume") or t.get("quoteVolume")
-            out[t["symbol"]] = (float(t["lastPr"]), float(vol))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return 200, out
+def tpsl_outcome(cl, hi, lo, i):
+    """i. mumun kapanışında LONG aç; TP/SL hangisi önce? (aynı mumda ikisi de olursa SL)"""
+    entry = cl[i]
+    tp_p = entry * (1 + TP_ROE / LEV / 100)
+    sl_p = entry * (1 - SL_ROE / LEV / 100)
+    fee = FEE_PCT * LEV
+    end = i + TPSL_HORIZON
+    if end >= len(cl):
+        return None   # veri yetmiyor, sonuç belirsiz
+    for k in range(i + 1, end + 1):
+        if lo[k] <= sl_p:
+            return "SL", -SL_ROE - fee
+        if hi[k] >= tp_p:
+            return "TP", TP_ROE - fee
+    return "ZA", (cl[end] / entry - 1) * 100 * LEV - fee
 
 
-def refresh_symbols(snap):
-    WATCH.clear()
-    for sym, (_, vol24) in snap.items():
-        if keep(sym) and vol24 >= MIN_24H_VOL:
-            WATCH.add(sym)
-    print(f"{len(WATCH)} Bitget vadeli coin izleniyor")
+def sliding_min(vals, w):
+    """out[i] = min(vals[i-w:i+1])"""
+    dq, out = deque(), []
+    for i, v in enumerate(vals):
+        while dq and vals[dq[-1]] >= v:
+            dq.pop()
+        dq.append(i)
+        while dq[0] <= i - w - 1:
+            dq.popleft()
+        out.append(vals[dq[0]])
+    return out
 
 
-def evaluate(hist, now):
-    pts = [p for p in hist if p[0] >= now - WINDOW_SEC]
-    if len(pts) < 3 or now - pts[0][0] < WINDOW_SEC * 0.6:
-        return None   # henüz yeterli geçmiş yok
-    low = min(p[1] for p in pts)
-    last_p, last_q = pts[-1][1], pts[-1][2]
-    if low <= 0 or last_p <= low:
-        return None
-    pct = (last_p / low - 1) * 100
-    if pct < MIN_PCT or pct > MAX_PCT:
-        return None
-    vol = last_q - pts[0][2]          # penceredeki yaklaşık USDT hacmi
-    if vol < MIN_WINDOW_VOL:
-        return None
-    normal = last_q / 1440 * (WINDOW_SEC / 60)   # aynı sürede normal hacim
-    if normal <= 0:
-        return None
-    mult = vol / normal
-    if mult < VOL_MULT:
-        return None
-    return last_p, pct, vol, mult
+def analyze(candles):
+    ts = [c[0] for c in candles]
+    cl = [c[1] for c in candles]
+    qv = [c[2] for c in candles]
+    n = len(cl)
+    pre = [0.0]
+    for v in qv:
+        pre.append(pre[-1] + v)
 
+    def base_mean(i, w):
+        lo = max(0, i - 1440)
+        hi = i - w + 1
+        if hi - lo < 60:
+            return 0
+        return (pre[hi] - pre[lo]) / (hi - lo)
 
-def process(snapshot, now):
-    """Anlık veriyi geçmişe ekler, şartı sağlayan coinleri döndürür."""
-    signals = []
-    for sym in WATCH:
-        d = snapshot.get(sym)
-        if not d:
-            continue
-        h = HISTORY.setdefault(sym, deque())
-        h.append((now, d[0], d[1]))
-        while h and h[0][0] < now - HISTORY_SEC:
-            h.popleft()
-        res = evaluate(h, now)
-        if not res:
-            continue
-        last = LAST_ALERT.get(sym)
-        if last and now - last < COOLDOWN_MIN * 60:
-            continue
-        signals.append((sym, d[1]) + res)
-    return signals
-
-
-def alert(sym, vol24, price, pct, vol, mult):
-    now = time.time()
-    LAST_ALERT[sym] = now
-    PENDING.append({"sym": sym, "t0": now, "entry": price, "done": []})
-    save_state()
-    t = datetime.now(TZ).strftime("%H:%M:%S")
-    follow = "/".join(str(h) for h in FOLLOW_MIN)
-    send(
-        f"⚡ ANLIK PUMP {sym} (Bitget Vadeli)\n"
-        f"Saat: {t}\n"
-        f"Fiyat: {fmt(price)}\n"
-        f"Son {WINDOW_SEC} sn: +{pct:.1f}%\n"
-        f"Bu sürede hacim: {fmt_vol(vol)} USDT ({mult:.1f}x normal)\n"
-        f"24s hacim: {fmt_vol(vol24)}\n"
-        f"📝 Kâğıt üstü takip: {follow} dk sonra sonuç gelecek"
-    )
-
-
-def track(snapshot, now):
-    """Bekleyen sinyallerin 15/30/60 dk sonraki sonucunu mesaj atar."""
-    changed = False
-    for p in list(PENDING):
-        d = snapshot.get(p["sym"])
-        for h in FOLLOW_MIN:
-            key = str(h)
-            if key in p["done"]:
+    per_w = {}
+    for w in WINDOWS:
+        mn = sliding_min(cl, w)
+        pct, mult, wvol = [0.0] * n, [0.0] * n, [0.0] * n
+        for i in range(w, n):
+            bm = base_mean(i, w)
+            if bm <= 0 or mn[i] <= 0:
                 continue
-            due = p["t0"] + h * 60
-            if now < due:
-                break
-            if now - due > MISSED_SEC:
-                p["done"].append(key)   # bot kapalıydı, bu süreyi atla
-                changed = True
-                continue
-            if not d:
-                continue
-            ret = (d[0] / p["entry"] - 1) * 100 - FEE_PCT
-            arr = STATS.setdefault(key, [])
-            arr.append(round(ret, 2))
-            del arr[:-MAX_STATS]
-            p["done"].append(key)
-            changed = True
-            avg = sum(arr) / len(arr)
-            win = 100 * sum(1 for x in arr if x > 0) / len(arr)
-            send(
-                f"📊 {p['sym']} - {h} dk sonuç\n"
-                f"Giriş: {fmt(p['entry'])} → Şimdi: {fmt(d[0])}\n"
-                f"Getiri: {ret:+.2f}% (komisyon düşülmüş)\n"
-                f"Toplam {len(arr)} sinyal ({h} dk): ort {avg:+.2f}%, kazanma %{win:.0f}"
-            )
-        if len(p["done"]) >= len(FOLLOW_MIN):
-            PENDING.remove(p)
-            changed = True
-    if changed:
-        save_state()
+            vol = pre[i + 1] - pre[i + 1 - w]
+            pct[i] = (cl[i] / mn[i] - 1) * 100
+            wvol[i] = vol
+            mult[i] = vol / (bm * w)
+        per_w[w] = (pct, mult, wvol)
+
+    # pump bölgeleri: 60 dk içinde dipten >= PUMP_PCT
+    mn60 = sliding_min(cl, 60)
+    episodes, i = [], 61
+    while i < n:
+        if mn60[i] > 0 and (cl[i] / mn60[i] - 1) * 100 >= PUMP_PCT:
+            first = i
+            last = i
+            j = i
+            while j < n and j - last <= 60:
+                if mn60[j] > 0 and (cl[j] / mn60[j] - 1) * 100 >= PUMP_PCT:
+                    last = j
+                j += 1
+            s0 = max(0, first - 60)
+            start = min(range(s0, first + 1), key=lambda k: cl[k])
+            peak = max(range(first, min(n, last + 1)), key=lambda k: cl[k])
+            if peak > start:
+                episodes.append((start, peak))
+            i = last + 60
+        else:
+            i += 1
+    return ts, cl, per_w, episodes
 
 
 def main():
-    alerts, pending, stats = load_state()
-    LAST_ALERT.update(alerts)
-    PENDING.extend(pending)
-    for k, v in stats.items():
-        if k in STATS and isinstance(v, list):
-            STATS[k] = v[-MAX_STATS:]
-    save_state()   # dosya her durumda oluşsun
-
-    status, snap = fetch_snapshot()
-    if not snap:
-        print("Borsa verisi alınamadı")
-        return
-    refresh_symbols(snap)
-    last_refresh = time.time()
-
-    end = time.time() + LOOP_MINUTES * 60
-    fails = 0
-    print(f"canlı tarama başladı: {POLL_SEC} sn aralık, {WINDOW_SEC} sn pencere, "
-          f"{len(PENDING)} bekleyen takip", flush=True)
-    while time.time() < end:
-        t0 = time.time()
-        status, snap = fetch_snapshot()
-        if snap is None:
-            fails += 1
-            wait = 60 if status in (418, 429) else min(5 * fails, 30)
-            print(f"veri alınamadı ({status}), {wait} sn bekleniyor", flush=True)
-            time.sleep(wait)
-            continue
-        fails = 0
-
-        now = time.time()
-        for sig in sorted(process(snap, now), key=lambda x: -x[3]):
-            try:
-                alert(*sig)
-            except Exception as e:
-                print("sinyal hatası", e)
-
+    tk = get("/api/v2/mix/market/tickers", {"productType": "USDT-FUTURES"}).get("data") or []
+    syms = []
+    for t in tk:
         try:
-            track(snap, now)
-        except Exception as e:
-            print("takip hatası", e)
+            vol = float(t.get("usdtVolume") or t.get("quoteVolume") or 0)
+        except ValueError:
+            continue
+        if keep(t["symbol"]) and vol >= MIN_24H_VOL:
+            syms.append(t["symbol"])
+    print(f"{len(syms)} coin taranacak, birkaç dakika sürebilir...", flush=True)
+    if not syms:
+        print("Ticker verisi alınamadı")
+        return
 
-        if time.time() - last_refresh > 1800:
-            refresh_symbols(snap)
-            last_refresh = time.time()
+    results = {}
+    with ThreadPoolExecutor(WORKERS) as ex:
+        for k, (sym, candles) in enumerate(ex.map(fetch_symbol, syms), 1):
+            if len(candles) >= 300:
+                results[sym] = analyze(candles)
+                HILO[sym] = ([c[3] for c in candles], [c[4] for c in candles])
+            if k % 50 == 0:
+                print(f"  {k}/{len(syms)}", flush=True)
 
-        time.sleep(max(0.0, POLL_SEC - (time.time() - t0)))
-    print("süre doldu, çıkılıyor")
+    # --- pump verisi ---
+    rows = []
+    for sym, (ts, cl, per_w, eps) in results.items():
+        for s, p in eps:
+            total = (cl[p] / cl[s] - 1) * 100
+            row = {"coin": sym, "baslangic": hm(ts[s]), "zirve": hm(ts[p]),
+                   "toplam_%": round(total, 1), "sure_dk": p - s}
+            for th in (2, 3, 5):
+                hit = next((k for k in range(s + 1, p + 1)
+                            if (cl[k] / cl[s] - 1) * 100 >= th), None)
+                for w in WINDOWS:
+                    pct, mult, wvol = per_w[w]
+                    key = f"%{th}_{w}dk"
+                    row[key + "_dk_sonra"] = (hit - s) if hit else ""
+                    row[key + "_hacimx"] = round(mult[hit], 1) if hit else ""
+                    row[key + "_hacim_usdt"] = round(wvol[hit]) if hit else ""
+            rows.append(row)
+    rows.sort(key=lambda r: -r["toplam_%"])
+    if rows:
+        with open("pumps.csv", "w", newline="", encoding="utf-8") as f:
+            wr = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            wr.writeheader()
+            wr.writerows(rows)
+    print(f"\n{len(rows)} pump bulundu (60 dk'da %{PUMP_PCT:.0f}+). Detay: pumps.csv")
+
+    print("\nPump'lar: dipten %3 olduğu anda 5 dk hacim çarpanı")
+    print("coin            toplam%  süre  %3'e kaç dk sonra  hacimx")
+    for r in rows[:30]:
+        print(f"{r['coin']:<14} {r['toplam_%']:>7} {r['sure_dk']:>5}  "
+              f"{str(r['%3_5dk_dk_sonra']):>16}  {str(r['%3_5dk_hacimx']):>7}")
+    mx = [r["%3_5dk_hacimx"] for r in rows if r["%3_5dk_hacimx"] != ""]
+    if mx:
+        print(f"\n%3 anında 5 dk hacim çarpanı: medyan {statistics.median(mx):.1f}x, "
+              f"min {min(mx):.1f}x, max {max(mx):.1f}x")
+
+    # --- ayar karşılaştırması ---
+    days = statistics.mean(len(v[0]) for v in results.values()) / 1440
+    total_eps = sum(len(v[3]) for v in results.values())
+    print(f"\nAyar taraması ({len(results)} coin, ~{days:.1f} gün, {total_eps} pump)")
+    print("pencere  min%  hacimx | yakalanan | yanlış sinyal/gün | sinyalde pump'ın ne kadarı geçmişti(medyan %)")
+    table = []
+    tpsl_rows = []
+    for w in WINDOWS:
+        for mp in MIN_PCTS:
+            for vx in VOL_MULTS:
+                caught, false, late = 0, 0, []
+                fwd = {h: [] for h in HORIZONS}
+                tps = []
+                for sym, (ts, cl, per_w, eps) in results.items():
+                    pct, mult, wvol = per_w[w]
+                    last = -999
+                    sigs = []
+                    for i in range(w, len(cl)):
+                        if (pct[i] >= mp and mult[i] >= vx and wvol[i] >= MIN_WINDOW_VOL
+                                and i - last >= COOLDOWN):
+                            sigs.append(i)
+                            last = i
+                    hi_, lo_ = HILO[sym]
+                    for i in sigs:
+                        o = tpsl_outcome(cl, hi_, lo_, i)
+                        if o:
+                            tps.append(o)
+                        for h in HORIZONS:
+                            if i + h < len(cl):
+                                fwd[h].append((cl[i + h] / cl[i] - 1) * 100 - FEE_PCT)
+                    for s, p in eps:
+                        hit = next((i for i in sigs if s <= i <= p), None)
+                        if hit is not None:
+                            caught += 1
+                            late.append((cl[hit] / cl[s] - 1) * 100)
+                    inside = {i for i in sigs for s, p in eps if s <= i <= p}
+                    false += len(sigs) - len(inside)
+                st = []
+                for h in HORIZONS:
+                    v = fwd[h]
+                    st.append((statistics.mean(v), 100 * sum(1 for x in v if x > 0) / len(v))
+                              if v else (0.0, 0.0))
+                tpsl_rows.append((w, mp, vx, tps))
+                table.append((w, mp, vx, caught, false / days,
+                              statistics.median(late) if late else 0, st))
+    table.sort(key=lambda r: (-r[3], r[4]))
+    for w, mp, vx, caught, fpd, late, st in table:
+        print(f"{w:>4} dk  {mp:>3}%  {vx:>5}x | {caught:>3}/{total_eps:<3}   | "
+              f"{fpd:>10.1f}        | {late:>6.1f}")
+    print(f"\nSinyalde LONG açılsaydı (komisyon -%{FEE_PCT} düşülmüş): ortalama getiri / kazanma oranı")
+    print("pencere  min%  hacimx | " + " | ".join(f"{h:>3} dk sonra   " for h in HORIZONS))
+    for w, mp, vx, caught, fpd, late, st in table:
+        cols = " | ".join(f"{a:>+6.2f}% / {b:>3.0f}%" for a, b in st)
+        print(f"{w:>4} dk  {mp:>3}%  {vx:>5}x | {cols}")
+    print("\nNot: ortalama > 0 ve kazanma% > 50 değilse bu ayar para kazandırmaz.")
+
+    # --- senin TP/SL ayarın ---
+    fee = FEE_PCT * LEV
+    be = (SL_ROE + fee) / (TP_ROE + SL_ROE) * 100
+    print(f"\nSENİN İŞLEMİN: {LEV}x, TP %{TP_ROE:.0f} / SL %{SL_ROE:.0f} (marjin), "
+          f"en fazla {TPSL_HORIZON} dk, komisyon dahil")
+    print(f"Başabaş için TP oranı en az ≈ %{be:.0f} olmalı")
+    out = []
+    for w, mp, vx, tps in tpsl_rows:
+        n = len(tps)
+        if n < 5:
+            continue
+        tp = sum(1 for o in tps if o[0] == "TP")
+        sl = sum(1 for o in tps if o[0] == "SL")
+        za = n - tp - sl
+        avg = sum(o[1] for o in tps) / n
+        out.append((w, mp, vx, n, 100 * tp / n, 100 * sl / n, 100 * za / n, avg))
+    print("\nEn karlı 12 ayar (en az 5 sinyal):")
+    print("pencere  min%  hacimx | sinyal |  TP%  |  SL%  | süre% | ort net marjin%/işlem")
+    for r in sorted(out, key=lambda r: -r[7])[:12]:
+        print(f"{r[0]:>4} dk  {r[1]:>3}%  {r[2]:>5}x | {r[3]:>6} | {r[4]:>4.0f}% | {r[5]:>4.0f}% | "
+              f"{r[6]:>4.0f}% | {r[7]:>+8.1f}")
+    print("\nEn yüksek TP oranı (en az 10 sinyal):")
+    for r in sorted([x for x in out if x[3] >= 10], key=lambda r: -r[4])[:5]:
+        print(f"{r[0]:>4} dk  {r[1]:>3}%  {r[2]:>5}x | {r[3]:>6} | {r[4]:>4.0f}% | {r[5]:>4.0f}% | "
+              f"{r[6]:>4.0f}% | {r[7]:>+8.1f}")
+    if not out:
+        print("Yeterli sinyal yok")
+
+    send_report()
 
 
 if __name__ == "__main__":
     main()
-            
+                    
