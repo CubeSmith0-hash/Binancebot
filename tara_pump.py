@@ -5,7 +5,10 @@ pump hacim verisini pumps.csv'ye yazar ve ayar kombinasyonlarını karşılaşt�
 Kullanım:  python tara_pump.py
 Ayarlar aşağıda.
 """
+import builtins
 import csv
+import html
+import os
 import statistics
 import time
 from collections import deque
@@ -35,6 +38,54 @@ MIN_PCTS = (2, 3, 5)          # pencerede dipten en az % yükseliş
 VOL_MULTS = (10, 20, 30)      # pencere hacmi / normal hacim
 MIN_WINDOW_VOL = 5_000
 COOLDOWN = 15                 # dk
+
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+REPORT = []
+
+
+def print(*args, **kw):
+    """Normal print + (ilerleme satırları hariç) Telegram raporuna ekler."""
+    builtins.print(*args, **kw)
+    if not kw.get("flush"):
+        REPORT.append(" ".join(str(a) for a in args))
+
+
+def tg(method, **kwargs):
+    for _ in range(3):
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
+                              timeout=30, **kwargs)
+            if r.status_code == 429:
+                time.sleep(r.json().get("parameters", {}).get("retry_after", 3) + 1)
+                continue
+            return r.status_code
+        except requests.RequestException:
+            time.sleep(2)
+    return 0
+
+
+def send_report():
+    if not TOKEN or not CHAT_ID:
+        builtins.print("Telegram bilgisi yok, rapor gönderilmedi")
+        return
+    text = "\n".join(REPORT)
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > 3500:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur.strip():
+        chunks.append(cur)
+    for ch in chunks:
+        tg("sendMessage", data={"chat_id": CHAT_ID, "parse_mode": "HTML",
+                                "text": "<pre>" + html.escape(ch) + "</pre>"})
+        time.sleep(1)
+    if os.path.exists("pumps.csv"):
+        with open("pumps.csv", "rb") as f:
+            tg("sendDocument", data={"chat_id": CHAT_ID}, files={"document": f})
+    builtins.print("Telegram'a gönderildi")
 
 
 def keep(sym):
@@ -239,7 +290,9 @@ def main():
         print(f"{w:>4} dk  {mp:>3}%  {vx:>5}x | {caught:>3}/{total_eps:<3}   | "
               f"{fpd:>10.1f}        | {late:>6.1f}")
 
+    send_report()
+
 
 if __name__ == "__main__":
     main()
-  
+                       
