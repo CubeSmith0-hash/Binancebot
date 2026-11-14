@@ -3,17 +3,18 @@
 """
 canli.py - Bitget USDT vadeli pump tarayici
 
+Sinyal sarti (sadece bunlar):
+  - ATR:     pencere (WINDOW_SEC) icindeki yukselis >= ATR(30, 1dk) x ATR_MULT
+  - Fitil:   ust fitil orani <= MAX_WICK_RATIO (tepeden satis yok)
+  - Sikisma: yukselisten onceki 15 mum volatilitesi / onceki 60 mum volatilitesi <= SQUEEZE_RATIO
+Yukselis % veya hacim sarti YOK (hacim sadece mesajda bilgi olarak gorunur).
+
 Akis:
- 1) Tum vadeli coinleri TEK istekle (tickers) her SCAN_INTERVAL sn'de okur, kayan pencerede
-    (WINDOW_SEC) ani yukselisi yakalar.
- 2) Aday cikinca 1 dk mumlarla kontrol eder:
-      - Hacim:   son pencere hacmi / onceki 60 mum ortalamasi   >= VOL_MULT
-      - ATR:     hareket buyuklugu / ATR(30)                    >= ATR_MULT
-      - Fitil:   ust fitil orani (tepeden satis)                <= MAX_WICK_RATIO
-      - Sikisma: yukselisten onceki 15 mum volatilitesi / onceki 60 mum volatilitesi <= SQUEEZE_RATIO
- 3) Tum filtreleri gecen aday -> Telegram sinyali.
-    Hacmi gecip filtreye takilanlar da SESSIZCE kagit ustunde takip edilir (eski/yeni kural kiyasi).
- 4) Kagit ustu takip: TP/SL (marj %) + 15/30/60 dk sonuc mesaji. Periyodik arastirma raporu.
+ 1) Tum coinlerin ATR'si onbellekte tutulur (kademeli yenilenir). Fiyatlar tek istekle (tickers)
+    her SCAN_INTERVAL sn'de okunur, pencere hareketi/ATR orani yeterliyse aday secilir.
+ 2) Aday icin 1 dk mumlarla ATR/fitil/sikisma kesin olarak hesaplanir.
+ 3) Hepsini gecerse Telegram sinyali. ATR'yi gecip fitil/sikismaya takilanlar sessizce takip edilir.
+ 4) Kagit ustu takip: TP/SL (marj %) + 15/30/60 dk sonuc mesaji, periyodik rapor.
  5) Durum canli_state.json'a yazilir (workflow sonunda commit'lenir).
 """
 import os
@@ -23,6 +24,7 @@ import time
 import math
 import signal
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -39,13 +41,12 @@ def _b(name, default):
 
 
 WINDOW_SEC = _f("WINDOW_SEC", 120)        # yukselis penceresi (sn)
-MIN_PCT = _f("MIN_PCT", 5.0)              # pencere icinde min yukselis %
-MAX_PCT = _f("MAX_PCT", 0)                # 0 = ust sinir yok
-VOL_MULT = _f("VOL_MULT", 10)             # hacim carpani (alt sinir)
 MIN_24H_USDT_VOL = _f("MIN_24H_USDT_VOL", 0)  # cok kucuk coinleri elemek icin (0 = kapali)
 
-USE_ATR = _b("USE_ATR", True)
 ATR_MULT = _f("ATR_MULT", 3.0)            # hareket >= ATR x ATR_MULT
+ATR_PREFILTER = _f("ATR_PREFILTER", 0.8)  # onbellekteki ATR kaydigi icin aday secimi esigi (ATR_MULT x bu)
+ATR_TTL_SEC = _f("ATR_TTL_SEC", 900)      # ATR onbellegi yenileme suresi
+ATR_REFRESH_PER_CYCLE = int(_f("ATR_REFRESH_PER_CYCLE", 80))  # dongu basina yenilenen coin sayisi
 USE_WICK = _b("USE_WICK", True)
 MAX_WICK_RATIO = _f("MAX_WICK_RATIO", 0.35)   # ust fitil / pencere araligi
 USE_SQUEEZE = _b("USE_SQUEEZE", True)
@@ -243,7 +244,7 @@ def analyze(sym, cur, low_w, candles=None):
 
 def check_filters(m):
     f = {
-        "atr": (not USE_ATR) or m["atr"] >= ATR_MULT,
+        "atr": m["atr"] >= ATR_MULT,
         "wick": (not USE_WICK) or m["wick"] <= MAX_WICK_RATIO,
         "squeeze": (not USE_SQUEEZE) or m["squeeze"] <= SQUEEZE_RATIO,
     }
@@ -320,20 +321,50 @@ def make_report(st):
     rej = [r for r in closed if not r["passed"]]
     lines = [
         "📊 ARAŞTIRMA RAPORU",
-        f"Eski kural (yükseliş+hacim): {stats_line(closed)}",
-        f"Yeni kural (tüm filtreler): {stats_line(passed)}",
+        f"Tüm ATR adayları: {stats_line(closed)}",
+        f"Sinyal verenler (ATR+fitil+sıkışma): {stats_line(passed)}",
         f"Filtreye takılan: {stats_line(rej)}",
         "",
-        "Tek tek filtre etkisi (eski kural adayları içinde):",
+        "Tek tek filtre etkisi (ATR adayları içinde):",
     ]
-    for key, label in (("atr", "ATR"), ("wick", "Fitil"), ("squeeze", "Sıkışma")):
+    for key, label in (("wick", "Fitil"), ("squeeze", "Sıkışma")):
         ok = [r for r in closed if r["f"].get(key)]
         no = [r for r in closed if not r["f"].get(key)]
         lines.append(f"{label} geçen: {stats_line(ok)}")
         lines.append(f"{label} takılan: {stats_line(no)}")
-    lines.append(f"\nAyar: pencere {WINDOW_SEC:.0f}sn, ≥%{MIN_PCT}, hacim ≥{VOL_MULT}x, "
+    lines.append(f"\nAyar: pencere {WINDOW_SEC:.0f}sn, "
                  f"ATR ≥{ATR_MULT}x, fitil ≤{MAX_WICK_RATIO}, sıkışma ≤{SQUEEZE_RATIO}")
     return "\n".join(lines)
+
+
+# ----------------------------------------------------------------- ATR ONBELLEK
+def _atr_of(rows):
+    trs = []
+    for i in range(1, len(rows)):
+        h, l, pc = rows[i][2], rows[i][3], rows[i - 1][4]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    return mean(trs)
+
+
+def refresh_atr(atr_cache, symbols):
+    """En eski/eksik ATR'leri kademeli yeniler (rate limit icin dongu basina sinirli)."""
+    now = time.time()
+    stale = [s for s in symbols if s not in atr_cache or now - atr_cache[s][1] > ATR_TTL_SEC]
+    stale.sort(key=lambda s: atr_cache.get(s, (0.0, 0.0))[1])
+    batch = stale[:ATR_REFRESH_PER_CYCLE]
+    if not batch:
+        return
+
+    def one(sym):
+        c = fetch_candles(sym, 60)
+        if not c or len(c) < 40:
+            return sym, None
+        return sym, _atr_of(c[-33:-2])   # son 2 mum (olasi pump) disarida
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for sym, a in ex.map(one, batch):
+            old = atr_cache.get(sym, (0.0, 0.0))[0]
+            atr_cache[sym] = (a if a else old, now)
 
 
 # ----------------------------------------------------------------- ANA DONGU
@@ -341,11 +372,12 @@ def main():
     st = load_state()
     hist = {}                # sym -> deque[(t, price)]
     next_check = {}          # sym -> bu zamandan once tekrar kontrol etme
+    atr_cache = {}           # sym -> (atr, guncelleme zamani)
     deadline = time.time() + RUN_MINUTES * 60
     last_save = time.time()
     log(f"Başladı. Açık takip: {len(st['v2_open'])}, kapanmış kayıt: {len(st['v2_closed'])}")
-    send_tg(f"🟢 canli.py başladı | pencere {WINDOW_SEC:.0f}sn ≥%{MIN_PCT} | hacim ≥{VOL_MULT}x | "
-            f"ATR {'≥%.1fx' % ATR_MULT if USE_ATR else 'kapalı'} | "
+    send_tg(f"🟢 canli.py başladı | pencere {WINDOW_SEC:.0f}sn | "
+            f"ATR ≥{ATR_MULT:.1f}x | "
             f"fitil {'≤%.2f' % MAX_WICK_RATIO if USE_WICK else 'kapalı'} | "
             f"sıkışma {'≤%.2f' % SQUEEZE_RATIO if USE_SQUEEZE else 'kapalı'}")
 
@@ -353,6 +385,7 @@ def main():
         t_cycle = time.time()
         prices = fetch_tickers()
         if prices:
+            refresh_atr(atr_cache, list(prices.keys()))
             now = time.time()
             open_syms = {r["sym"] for r in st["v2_open"]}
             cands = []
@@ -367,24 +400,28 @@ def main():
                     continue
                 if now - st["v2_cooldown"].get(sym, 0) < COOLDOWN_MIN * 60:
                     continue
+                a = atr_cache.get(sym)
+                if not a or a[0] <= 0:
+                    continue
                 win = [x for x in h if x[0] >= now - WINDOW_SEC]
                 if len(win) < 2:
                     continue
                 low_w = min(x[1] for x in win)
-                rise = (p / low_w - 1.0) * 100.0
-                if rise < MIN_PCT or (MAX_PCT > 0 and rise > MAX_PCT):
+                ratio = (p - low_w) / a[0]
+                if ratio < ATR_MULT * ATR_PREFILTER:
                     continue
-                cands.append((rise, sym, p, low_w))
+                cands.append((ratio, sym, p, low_w))
 
             cands.sort(reverse=True)
-            for rise, sym, p, low_w in cands[:MAX_CANDIDATES_PER_CYCLE]:
+            for _ratio, sym, p, low_w in cands[:MAX_CANDIDATES_PER_CYCLE]:
+                rise = (p / low_w - 1.0) * 100.0
                 m = analyze(sym, p, low_w)
                 next_check[sym] = time.time() + RECHECK_SEC
                 if m is None:
                     continue
                 m["rise"] = round(rise, 2)
-                if m["vol"] < VOL_MULT:
-                    log(f"{sym} +{rise:.1f}% ama hacim {m['vol']:.1f}x < {VOL_MULT}x, elendi")
+                if m["atr"] < ATR_MULT:
+                    log(f"{sym} +{rise:.1f}% ama ATR {m['atr']:.1f}x < {ATR_MULT}x, elendi")
                     continue
                 f, passed = check_filters(m)
                 st["v2_cooldown"][sym] = time.time()
@@ -399,7 +436,7 @@ def main():
                     tp_price = p * (1 + TP_MARGIN / LEVERAGE / 100.0)
                     sl_price = p * (1 - SL_MARGIN / LEVERAGE / 100.0)
                     send_tg(
-                        f"⚡ ANLIK PUMP | {sym}\n"
+                        f"🚀 PUMP SİNYALİ | {sym}\n"
                         f"Fiyat: {fmt_price(p)}\n"
                         f"{WINDOW_SEC:.0f} sn yükseliş: +{rise:.2f}%\n"
                         f"Hacim: {m['vol']:.1f}x | ATR: {m['atr']:.1f}x | "
