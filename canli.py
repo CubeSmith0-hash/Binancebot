@@ -208,3 +208,36 @@ def main():
 
     status, snap = fetch_snapshot()
     if not snap:
+        print("veri alınamadı, durum:", status)
+        return
+    refresh_symbols(snap)
+
+    end = time.time() + LOOP_MINUTES * 60
+    last_refresh = time.time()
+    fails = 0
+    while time.time() < end:
+        t0 = time.time()
+        status, snap = fetch_snapshot()
+        if snap:
+            fails = 0
+            now = time.time()
+            if now - last_refresh > 600:
+                refresh_symbols(snap)
+                last_refresh = now
+            for sig in process(snap, now):
+                alert(*sig)
+        else:
+            fails += 1
+            if fails >= 30:
+                print("art arda 30 hata, çıkılıyor")
+                break
+            time.sleep(5)
+        wait = POLL_SEC - (time.time() - t0)
+        if wait > 0:
+            time.sleep(wait)
+
+    save_state()
+
+
+if __name__ == "__main__":
+    main()
