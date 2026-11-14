@@ -19,7 +19,7 @@ REQ_SLEEP = 0.2
 
 # --- DÜŞÜŞ AYARLARI ---
 DROP_LOOKBACK = 32    # kaç mum geriye bakılsın (32 x 15dk = 8 saat)
-MIN_DROP_PCT = 16.0   # tepe -> dip düşüşü en az %kaç olmalı
+MIN_DROP_PCT = 56.0   # tepe -> dip düşüşü en az %kaç olmalı (15dk grafikte)
 RECENT_LOW_BARS = 4   # dip son kaç mum içinde olmalı (4 x 15dk = 1 saat)
 
 # --- FVG AYARLARI ---
@@ -226,7 +226,7 @@ def main():
 
         t = datetime.now(TZ).strftime("%H:%M")
         send(
-            f"🟢 {symbol} FVG LONG PUMP sinyali\n"
+            f"🟢 {symbol} FVG LONG PUMP sinyali (15dk)\n"
             f"Saat: {t}\n"
             f"Fiyat: {fmt(price)}\n"
             f"Tepeden düşüş: -{drop_pct:.1f}% ({fmt(hi_v)} -> {fmt(lo_v)})\n"
@@ -258,3 +258,4 @@ if __name__ == "__main__":
             break
         time.sleep(wait)
     print("süre doldu, workflow yeniden başlayacak")
+                       
