@@ -18,7 +18,7 @@ WORKERS = 4
 REQ_SLEEP = 0.2
 
 # --- DÜŞÜŞ AYARLARI ---
-DROP_LOOKBACK = 32    # kaç mum geriye bakılsın (32 x 15dk = 8 saat)
+DROP_LOOKBACK = 200   # kaç mum geriye bakılsın (200 x 15dk = ~50 saat, tepe bu aralıkta herhangi bir yerde olabilir)
 MIN_DROP_PCT = 56.0   # tepe -> dip düşüşü en az %kaç olmalı (15dk grafikte)
 RECENT_LOW_BARS = 4   # dip son kaç mum içinde olmalı (4 x 15dk = 1 saat)
 
@@ -258,4 +258,4 @@ if __name__ == "__main__":
             break
         time.sleep(wait)
     print("süre doldu, workflow yeniden başlayacak")
-                       
+  
