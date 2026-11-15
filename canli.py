@@ -86,16 +86,32 @@ def send(text):
             time.sleep(2)
 
 
+def _is_num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
 def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-            limit = time.time() - COOLDOWN_MIN * 60
-            return {k: v for k, v in data.items() if v > limit}
-        except (OSError, ValueError):
-            pass
-    return {}
+    """State dosyasını okur. Değer liste/bozuk olsa bile çökmez, sadece geçerli
+    sayısal zamanları alır."""
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    limit = time.time() - COOLDOWN_MIN * 60
+    out = {}
+    for k, v in data.items():
+        if isinstance(v, (list, tuple)):
+            nums = [x for x in v if _is_num(x)]
+            v = max(nums) if nums else None
+        if _is_num(v) and v > limit:
+            out[k] = float(v)
+    return out
 
 
 def save_state():
@@ -241,3 +257,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+            
