@@ -23,7 +23,7 @@ PRESETS = {
         "VOL_MULT": 8.0,
         "MIN_24H_VOL": 100_000,
         "MIN_LIQ": 10_000,
-        "COOLDOWN_MIN": 10,
+        "COOLDOWN_MIN": 5,
     },
     # Erken yakalama: daha çok sinyal, daha çok yalancı pump
     "erken": {
@@ -32,7 +32,7 @@ PRESETS = {
         "VOL_MULT": 5.0,
         "MIN_24H_VOL": 50_000,
         "MIN_LIQ": 8_000,
-        "COOLDOWN_MIN": 10,
+        "COOLDOWN_MIN": 5,
     },
 }
 CFG = PRESETS.get(MODE, PRESETS["guclu"])
@@ -334,4 +334,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+            
