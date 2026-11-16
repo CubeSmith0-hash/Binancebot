@@ -10,22 +10,49 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))  # ne kadar süre çalışsın
-POLL_SEC = 1               # kaç saniyede bir taransın
-WINDOW_SEC = 300           # son kaç saniyeye bakılsın
-MIN_PCT = 1.0              # pencere içindeki dipten en az % kaç yükseliş
-MAX_PCT = 999.0              # pencere içindeki dipten en fazla % kaç yükseliş (üst sınır)
-VOL_MULT = 50.0             # pencere hacmi, normal hacmin en az kaç katı olmalı
-VOL_MAX = 999.0             # pencere hacmi, normal hacmin en fazla kaç katı olabilir (üst sınır)
+
+# --- MOD SEÇİMİ ---
+# GitHub Actions'ta env olarak MODE=guclu veya MODE=erken ver (varsayılan: guclu)
+MODE = os.environ.get("MODE", "guclu").lower()
+
+PRESETS = {
+    # Güçlü pump: daha az sinyal, daha yüksek pump oranı (ama daha geç giriş)
+    "guclu": {
+        "WINDOW_SEC": 120,
+        "MIN_PCT": 15.0,
+        "VOL_MULT": 8.0,
+        "MIN_24H_VOL": 100_000,
+        "MIN_LIQ": 10_000,
+        "COOLDOWN_MIN": 10,
+    },
+    # Erken yakalama: daha çok sinyal, daha çok yalancı pump
+    "erken": {
+        "WINDOW_SEC": 120,
+        "MIN_PCT": 8.0,
+        "VOL_MULT": 5.0,
+        "MIN_24H_VOL": 50_000,
+        "MIN_LIQ": 8_000,
+        "COOLDOWN_MIN": 10,
+    },
+}
+CFG = PRESETS.get(MODE, PRESETS["guclu"])
+
+POLL_SEC = 2               # kaç saniyede bir taransın
+WINDOW_SEC = CFG["WINDOW_SEC"]       # son kaç saniyeye bakılsın
+MIN_PCT = CFG["MIN_PCT"]             # pencere içindeki dipten en az % kaç yükseliş
+MAX_PCT = 999.0                      # üst sınır
+VOL_MULT = CFG["VOL_MULT"]           # pencere hacmi normalin en az kaç katı
+VOL_MAX = 999.0                      # üst sınır
 MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USD hacim olmalı
-MIN_24H_VOL = 50_000       # 24 saatlik USD hacmi bunun altındaki coinler sinyal vermez
-COOLDOWN_MIN = 5           # aynı coin için tekrar sinyal bekleme süresi (dk)
+MIN_24H_VOL = CFG["MIN_24H_VOL"]     # 24s hacmi bunun altındaki coinler sinyal vermez
+COOLDOWN_MIN = CFG["COOLDOWN_MIN"]   # aynı coin için tekrar sinyal bekleme süresi (dk)
 HISTORY_SEC = WINDOW_SEC + 30
 TZ = timezone(timedelta(hours=3))
 STATE_FILE = "canli_meme_state.json"
 
-# --- Memecoin'e özel yeni ayarlar ---
-MIN_LIQ = 5_000            # havuz likiditesi (USD) bunun altındaysa sinyal verme (rug/ince likidite)
-MAX_WATCH = 90             # aynı anda izlenecek en fazla havuz (DexScreener limiti için)
+# --- Memecoin'e özel ayarlar ---
+MIN_LIQ = CFG["MIN_LIQ"]   # havuz likiditesi (USD) bunun altındaysa sinyal verme
+MAX_WATCH = 90             # aynı anda izlenecek en fazla havuz
 DISCOVER_SEC = 60          # izleme listesi kaç saniyede bir yenilensin
 
 # Veri kaynakları (Axiom'un resmi API'si yok):
@@ -83,8 +110,7 @@ def _is_num(x):
 
 
 def load_state():
-    """State dosyasını okur. Değer liste/bozuk olsa bile çökmez, sadece geçerli
-    sayısal zamanları alır."""
+    """State dosyasını okur. Değer liste/bozuk olsa bile çökmez."""
     if not os.path.exists(STATE_FILE):
         return {}
     try:
@@ -157,7 +183,7 @@ def discover():
     for k in list(HISTORY):
         if k not in WATCH:
             del HISTORY[k]
-    print(f"{len(WATCH)} Solana memecoin havuzu izleniyor")
+    print(f"{len(WATCH)} Solana memecoin havuzu izleniyor (mod: {MODE})")
     return True
 
 
@@ -267,6 +293,7 @@ def alert(addr, vol24, price, pct, vol, mult):
 
 
 def main():
+    print(f"Mod: {MODE} | pencere {WINDOW_SEC}sn | min %{MIN_PCT} | hacim {VOL_MULT}x")
     LAST_ALERT.update(load_state())
     save_state()   # dosya her durumda oluşsun
 
@@ -307,4 +334,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
+    
