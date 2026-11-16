@@ -16,45 +16,34 @@ MIN_PCT = 4.0              # pencere içindeki dipten en az % kaç yükseliş
 MAX_PCT = 5.0              # pencere içindeki dipten en fazla % kaç yükseliş (üst sınır)
 VOL_MULT = 1.0             # pencere hacmi, normal hacmin en az kaç katı olmalı
 VOL_MAX = 20.0             # pencere hacmi, normal hacmin en fazla kaç katı olabilir (üst sınır)
-MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USDT hacim olmalı
-MIN_24H_VOL = 50_000       # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
+MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USD hacim olmalı
+MIN_24H_VOL = 50_000       # 24 saatlik USD hacmi bunun altındaki coinler sinyal vermez
 COOLDOWN_MIN = 5           # aynı coin için tekrar sinyal bekleme süresi (dk)
 HISTORY_SEC = WINDOW_SEC + 30
 TZ = timezone(timedelta(hours=3))
-STATE_FILE = "canli_state.json"
+STATE_FILE = "canli_meme_state.json"
 
-# Bitget USDT-M Futures
-HOST = "https://api.bitget.com"
-TICKER_PATH = "/api/v2/mix/market/tickers"
-TICKER_PARAMS = {"productType": "USDT-FUTURES"}
+# --- Memecoin'e özel yeni ayarlar ---
+MIN_LIQ = 5_000            # havuz likiditesi (USD) bunun altındaysa sinyal verme (rug/ince likidite)
+MAX_WATCH = 90             # aynı anda izlenecek en fazla havuz (DexScreener limiti için)
+DISCOVER_SEC = 60          # izleme listesi kaç saniyede bir yenilensin
 
-STABLES = {
-    "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
-    "AEUR", "EUR", "EURI", "TRY", "GBP", "BRL", "RUB", "UAH", "XUSD",
+# Veri kaynakları (Axiom'un resmi API'si yok):
+# 1) GeckoTerminal -> trending / yeni / hacimli Solana havuzları (aday listesi)
+# 2) DexScreener   -> adayların anlık fiyat + hacim + likidite verisi
+GT = "https://api.geckoterminal.com/api/v2/networks/solana"
+GT_HEADERS = {"Accept": "application/json;version=20230302"}
+DS = "https://api.dexscreener.com/latest/dex/pairs/solana/"
+
+SKIP_SYMBOLS = {
+    "SOL", "WSOL", "USDC", "USDT", "PYUSD", "USDS", "USD1", "USDE",
+    "JITOSOL", "MSOL", "BSOL", "HSOL", "JUPSOL", "INF", "JLP", "WBTC", "WETH",
 }
-STOCKS = {
-    "AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "GOOG", "AMZN", "META",
-    "COIN", "MSTR", "CRCL", "HOOD", "SPY", "QQQ", "NFLX", "AMD",
-    "INTC", "BABA", "PLTR", "ORCL", "AVGO", "JPM", "V", "MA", "DIS",
-    "PYPL", "UBER", "SHOP", "SQ", "TSM", "NKE", "KO", "PEP", "WMT",
-    "DELL", "IBM", "NOW", "CRM", "IREN", "BX", "HPE", "CRWD",
-}
-NON_CRYPTO = {"PAXG", "XAUT"}
 
-HISTORY = {}      # sembol -> deque[(zaman, fiyat, 24s_usdt_hacim)]
-LAST_ALERT = {}   # sembol -> son sinyal zamanı
-WATCH = set()     # taranacak semboller
-
-
-def keep(sym):
-    if not sym.endswith("USDT"):
-        return False
-    base = sym[:-4]
-    if base in STABLES or base in NON_CRYPTO or base in STOCKS:
-        return False
-    if base.endswith("B") and base[:-1] in STOCKS:
-        return False
-    return True
+HISTORY = {}      # havuz adresi -> deque[(zaman, fiyat, 24s_usd_hacim)]
+LAST_ALERT = {}   # havuz adresi -> son sinyal zamanı
+META = {}         # havuz adresi -> (sembol, mint, likidite, mcap)
+WATCH = []        # taranacak havuz adresleri
 
 
 def fmt(p):
@@ -76,7 +65,8 @@ def send(text):
         try:
             r = requests.post(
                 f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": text},
+                json={"chat_id": CHAT_ID, "text": text,
+                      "disable_web_page_preview": True},
                 timeout=15,
             )
             print("telegram:", r.status_code)
@@ -124,42 +114,90 @@ def save_state():
         print("state yazılamadı", e)
 
 
-def fetch_snapshot():
-    """(durum_kodu, {sembol: (fiyat, 24s_usdt_hacim)}) döndürür."""
+def gt_pools(path, params=None):
+    """GeckoTerminal'den havuz adreslerini döndürür (hata olursa boş liste)."""
     try:
-        r = requests.get(HOST + TICKER_PATH, params=TICKER_PARAMS, timeout=15)
+        r = requests.get(GT + path, params=params, headers=GT_HEADERS, timeout=15)
     except requests.RequestException as e:
-        print("hata", e)
-        return 0, None
+        print("GT hata", e)
+        return []
     if r.status_code != 200:
-        print("HTTP", r.status_code, TICKER_PATH)
-        if r.status_code in (403, 451):
-            print("bu sunucunun IP'si Bitget tarafından engelli")
-        return r.status_code, None
+        print("GT HTTP", r.status_code, path)
+        return []
     try:
-        body = r.json()
+        data = r.json().get("data", [])
     except ValueError:
-        print("json okunamadı")
-        return 0, None
-    if body.get("code") != "00000":
-        print("API hatası:", body.get("code"), body.get("msg"))
-        return 0, None
+        return []
+    out = []
+    for d in data:
+        addr = (d.get("attributes") or {}).get("address")
+        if addr:
+            out.append(addr)
+    return out
+
+
+def discover():
+    """Trending (5m, 1h), yeni ve hacimli havuzlardan izleme listesi kurar."""
+    sources = [
+        ("/trending_pools", {"duration": "5m", "page": 1}),
+        ("/trending_pools", {"duration": "5m", "page": 2}),
+        ("/trending_pools", {"duration": "1h", "page": 1}),
+        ("/new_pools", {"page": 1}),
+        ("/pools", {"sort": "h24_volume_usd_desc", "page": 1}),
+    ]
+    seen = []
+    for path, params in sources:
+        for a in gt_pools(path, params):
+            if a not in seen:
+                seen.append(a)
+        time.sleep(0.3)
+    if not seen:
+        return False
+    WATCH[:] = seen[:MAX_WATCH]
+    for k in list(HISTORY):
+        if k not in WATCH:
+            del HISTORY[k]
+    print(f"{len(WATCH)} Solana memecoin havuzu izleniyor")
+    return True
+
+
+def fetch_snapshot():
+    """(durum_kodu, {havuz: (fiyat, 24s_hacim)}) döndürür; META'yı da günceller."""
     out = {}
-    for t in body.get("data", []):
+    status = 200
+    for i in range(0, len(WATCH), 30):
+        chunk = WATCH[i:i + 30]
         try:
-            vol = t.get("usdtVolume") or t.get("quoteVolume")
-            out[t["symbol"]] = (float(t["lastPr"]), float(vol))
-        except (KeyError, TypeError, ValueError):
+            r = requests.get(DS + ",".join(chunk), timeout=10)
+        except requests.RequestException as e:
+            print("hata", e)
+            status = 0
             continue
-    return 200, out
-
-
-def refresh_symbols(snap):
-    WATCH.clear()
-    for sym, (_, vol24) in snap.items():
-        if keep(sym) and vol24 >= MIN_24H_VOL:
-            WATCH.add(sym)
-    print(f"{len(WATCH)} Bitget vadeli coin izleniyor")
+        if r.status_code != 200:
+            print("DS HTTP", r.status_code)
+            status = r.status_code
+            if r.status_code == 429:
+                break
+            continue
+        try:
+            pairs = r.json().get("pairs") or []
+        except ValueError:
+            continue
+        for p in pairs:
+            try:
+                addr = p["pairAddress"]
+                price = float(p["priceUsd"])
+                vol24 = float((p.get("volume") or {}).get("h24") or 0)
+                liq = float((p.get("liquidity") or {}).get("usd") or 0)
+                mc = float(p.get("marketCap") or p.get("fdv") or 0)
+                base = p.get("baseToken") or {}
+                META[addr] = (base.get("symbol", "?"), base.get("address", ""), liq, mc)
+                out[addr] = (price, vol24)
+            except (KeyError, TypeError, ValueError):
+                continue
+    if out:
+        return 200, out
+    return status or 0, None
 
 
 def evaluate(hist, now):
@@ -173,7 +211,7 @@ def evaluate(hist, now):
     pct = (last_p / low - 1) * 100
     if pct < MIN_PCT or pct > MAX_PCT:
         return None
-    vol = last_q - pts[0][2]          # penceredeki yaklaşık USDT hacmi
+    vol = last_q - pts[0][2]          # penceredeki yaklaşık USD hacmi
     if vol < MIN_WINDOW_VOL:
         return None
     normal = last_q / 1440 * (WINDOW_SEC / 60)   # aynı sürede normal hacim
@@ -188,35 +226,43 @@ def evaluate(hist, now):
 def process(snapshot, now):
     """Anlık veriyi geçmişe ekler, şartı sağlayan coinleri döndürür."""
     signals = []
-    for sym in WATCH:
-        d = snapshot.get(sym)
+    for addr in WATCH:
+        d = snapshot.get(addr)
         if not d:
             continue
-        h = HISTORY.setdefault(sym, deque())
+        h = HISTORY.setdefault(addr, deque())
         h.append((now, d[0], d[1]))
         while h and h[0][0] < now - HISTORY_SEC:
             h.popleft()
+        sym, mint, liq, mc = META.get(addr, ("?", "", 0, 0))
+        if sym.upper() in SKIP_SYMBOLS:
+            continue
+        if liq < MIN_LIQ or d[1] < MIN_24H_VOL:
+            continue
         res = evaluate(h, now)
         if not res:
             continue
-        last = LAST_ALERT.get(sym)
+        last = LAST_ALERT.get(addr)
         if last and now - last < COOLDOWN_MIN * 60:
             continue
-        signals.append((sym, d[1]) + res)
+        signals.append((addr, d[1]) + res)
     return signals
 
 
-def alert(sym, vol24, price, pct, vol, mult):
-    LAST_ALERT[sym] = time.time()
+def alert(addr, vol24, price, pct, vol, mult):
+    LAST_ALERT[addr] = time.time()
     save_state()
+    sym, mint, liq, mc = META.get(addr, ("?", "", 0, 0))
     t = datetime.now(TZ).strftime("%H:%M:%S")
     send(
-        f"⚡ ANLIK PUMP {sym} (Bitget Vadeli)\n"
+        f"⚡ ANLIK PUMP {sym} (Solana Memecoin)\n"
         f"Saat: {t}\n"
-        f"Fiyat: {fmt(price)}\n"
+        f"Fiyat: ${fmt(price)}\n"
         f"Son {WINDOW_SEC} sn: +{pct:.1f}%\n"
-        f"Bu sürede hacim: {fmt_vol(vol)} USDT ({mult:.1f}x normal)\n"
-        f"24s hacim: {fmt_vol(vol24)}"
+        f"Bu sürede hacim: ${fmt_vol(vol)} ({mult:.1f}x normal)\n"
+        f"24s hacim: ${fmt_vol(vol24)} | Likidite: ${fmt_vol(liq)} | MC: ${fmt_vol(mc)}\n"
+        f"CA (Axiom'a yapıştır): {mint}\n"
+        f"https://dexscreener.com/solana/{addr}"
     )
 
 
@@ -224,14 +270,16 @@ def main():
     LAST_ALERT.update(load_state())
     save_state()   # dosya her durumda oluşsun
 
+    if not discover():
+        print("aday listesi alınamadı")
+        return
     status, snap = fetch_snapshot()
     if not snap:
         print("veri alınamadı, durum:", status)
         return
-    refresh_symbols(snap)
 
     end = time.time() + LOOP_MINUTES * 60
-    last_refresh = time.time()
+    last_discover = time.time()
     fails = 0
     while time.time() < end:
         t0 = time.time()
@@ -239,9 +287,9 @@ def main():
         if snap:
             fails = 0
             now = time.time()
-            if now - last_refresh > 600:
-                refresh_symbols(snap)
-                last_refresh = now
+            if now - last_discover > DISCOVER_SEC:
+                discover()
+                last_discover = now
             for sig in process(snap, now):
                 alert(*sig)
         else:
@@ -249,7 +297,7 @@ def main():
             if fails >= 30:
                 print("art arda 30 hata, çıkılıyor")
                 break
-            time.sleep(5)
+            time.sleep(10 if status == 429 else 5)
         wait = POLL_SEC - (time.time() - t0)
         if wait > 0:
             time.sleep(wait)
