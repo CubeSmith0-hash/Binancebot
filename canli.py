@@ -16,11 +16,11 @@ MIN_24H_VOL = 50_000       # 24 saatlik USDT hacmi bunun altındaki coinler tara
 TZ = timezone(timedelta(hours=3))
 STATE_FILE = "pump15_state.json"
 WORKERS = 4
-REQ_SLEEP = 0.2
+REQ_SLEEP = 0.3
 
 # --- PUMP AYARLARI ---
 MIN_CANDLE_PCT = 5.0       # kapanan yeşil mum en az % kaç yükselmeli (kapanış/açılış)
-PREV_GREEN = 5            # önceki kaç YEŞİL mumda %5 artış olmamalı
+PREV_GREEN = 5             # önceki kaç YEŞİL mumda %5 artış olmamalı
 PREV_MAX_PCT = 5.0         # bu yeşil mumlardan hiçbiri bu yükselişe ulaşmamalı
 FETCH_LIMIT = 100          # yeşil mumları bulmak için kaç mum çekilsin
 
@@ -28,8 +28,8 @@ FETCH_LIMIT = 100          # yeşil mumları bulmak için kaç mum çekilsin
 SCAN_SECONDS = 30          # kaç saniyede bir taransın
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "345"))  # workflow timeout'tan (355 dk) kısa olmalı
 
-HOST = "https://api.bitget.com"
-PRODUCT = "USDT-FUTURES"
+HOST = "https://open-api.bingx.com"
+MARKET = "BingX USDT-M Perpetual"   # /openApi/swap/* = USDT-M perpetual vadeli (coin-M değil)
 
 STABLES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
@@ -59,13 +59,16 @@ def get(path, params=None):
         if r.status_code != 200:
             print("HTTP", r.status_code, path)
             if r.status_code in (403, 451):
-                print("bu sunucunun IP'si Bitget tarafından engelli")
+                print("bu sunucunun IP'si BingX tarafından engelli")
             return None
         try:
             body = r.json()
         except ValueError:
             return None
-        if body.get("code") != "00000":
+        if body.get("code") != 0:
+            if body.get("code") == 100410:      # rate limit
+                time.sleep(1 + attempt)
+                continue
             print("API hatası:", path, body.get("code"), body.get("msg"))
             return None
         return body.get("data")
@@ -74,13 +77,11 @@ def get(path, params=None):
 
 def keep(c):
     sym = c.get("symbol", "")
-    if not sym.endswith("USDT"):
+    if not sym.endswith("-USDT"):
         return False
-    if c.get("symbolStatus", "normal") != "normal":
+    if c.get("status", 1) != 1:
         return False
-    if c.get("symbolType", "perpetual") != "perpetual":
-        return False
-    base = c.get("baseCoin") or sym[:-4]
+    base = sym[:-5]
     if base in STABLES or base in NON_CRYPTO or base in STOCKS:
         return False
     if base.endswith("B") and base[:-1] in STOCKS:
@@ -90,18 +91,16 @@ def keep(c):
 
 def check(symbol):
     time.sleep(REQ_SLEEP)
-    k = get("/api/v2/mix/market/candles",
-            {"symbol": symbol, "productType": PRODUCT,
-             "granularity": INTERVAL, "limit": FETCH_LIMIT})
+    k = get("/openApi/swap/v3/quote/klines",
+            {"symbol": symbol, "interval": INTERVAL, "limit": FETCH_LIMIT})
     if not k:
         return None
     try:
-        # [ts, open, high, low, close, baseVol, quoteVol]
         rows = sorted(
-            ({"ts": int(c[0]), "o": float(c[1]), "h": float(c[2]),
-              "l": float(c[3]), "c": float(c[4])} for c in k),
+            ({"ts": int(c["time"]), "o": float(c["open"]), "h": float(c["high"]),
+              "l": float(c["low"]), "c": float(c["close"])} for c in k),
             key=lambda x: x["ts"])
-    except (IndexError, ValueError, TypeError):
+    except (KeyError, ValueError, TypeError):
         return None
 
     now_ms = int(time.time() * 1000)
@@ -120,7 +119,7 @@ def check(symbol):
     if candle_pct < MIN_CANDLE_PCT:
         return None
 
-    # sinyal mumundan önceki son 15 yeşil mum (kırmızılar atlanır)
+    # sinyal mumundan önceki son PREV_GREEN yeşil mum (kırmızılar atlanır)
     greens = [r for r in closed[:-1] if r["o"] > 0 and r["c"] > r["o"]][-PREV_GREEN:]
     if len(greens) < PREV_GREEN:
         return None                          # yeterli geçmiş yok
@@ -186,23 +185,23 @@ def save_state(data):
 
 
 def main(sent_data):
-    contracts = get("/api/v2/mix/market/contracts", {"productType": PRODUCT})
+    contracts = get("/openApi/swap/v2/quote/contracts")
     if not contracts:
         print("Borsa verisi alınamadı")
         return
 
-    tick = get("/api/v2/mix/market/tickers", {"productType": PRODUCT}) or []
+    tick = get("/openApi/swap/v2/quote/ticker") or []
     vol24 = {}
     for t in tick:
         try:
-            vol24[t["symbol"]] = float(t.get("usdtVolume") or t.get("quoteVolume") or 0)
+            vol24[t["symbol"]] = float(t.get("quoteVolume") or 0)
         except (KeyError, ValueError, TypeError):
             continue
 
     symbols = [c["symbol"] for c in contracts if keep(c)]
     if vol24:
         symbols = [s for s in symbols if vol24.get(s, 0) >= MIN_24H_VOL]
-    print(f"{len(symbols)} coin taranıyor")
+    print(f"{MARKET}: {len(symbols)} coin taranıyor")
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         results = [r for r in ex.map(check, symbols) if r]
@@ -220,7 +219,7 @@ def main(sent_data):
 
         t = datetime.now(TZ).strftime("%H:%M:%S")
         send(
-            f"⚡ ANLIK PUMP {symbol} (Bitget Vadeli)\n"
+            f"⚡ ANLIK PUMP {symbol} ({MARKET})\n"
             f"Saat: {t}\n"
             f"Kapanış: {fmt(price)}\n"
             f"Kapanan {INTERVAL} mum: +{candle_pct:.1f}% ({fmt(open_p)} -> {fmt(price)})\n"
@@ -238,7 +237,7 @@ if __name__ == "__main__":
     end = time.time() + RUN_MINUTES * 60
     sent = load_state()
     save_state(sent)   # dosya her durumda oluşsun
-    print("bot başladı")
+    print("bot başladı:", MARKET)
     while True:
         try:
             main(sent)
@@ -249,3 +248,4 @@ if __name__ == "__main__":
             break
         time.sleep(wait)
     print("süre doldu, workflow yeniden başlayacak")
+    
