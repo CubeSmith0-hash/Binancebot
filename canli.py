@@ -221,6 +221,7 @@ def main(sent_data):
         send(
             f"⚡ ANLIK PUMP {symbol} ({MARKET})\n"
             f"Saat: {t}\n"
+            f"Mum açılış saati: {datetime.fromtimestamp(ts / 1000, TZ).strftime('%H:%M')}\n"
             f"Kapanış: {fmt(price)}\n"
             f"Kapanan {INTERVAL} mum: +{candle_pct:.1f}% ({fmt(open_p)} -> {fmt(price)})\n"
             f"Mum tepesi: {fmt(high_p)}\n"
