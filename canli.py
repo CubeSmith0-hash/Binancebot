@@ -19,9 +19,10 @@ WORKERS = 4
 REQ_SLEEP = 0.2
 
 # --- PUMP AYARLARI ---
-MIN_CANDLE_PCT = 5.0       # kapanan mum en az % kaç yükselmeli (kapanış/açılış)
-PREV_CANDLES = 30          # önceki kaç mumda %5 artış olmamalı
-PREV_MAX_PCT = 5.0         # önceki mumlardan hiçbiri bu yükselişe ulaşmamalı
+MIN_CANDLE_PCT = 5.0       # kapanan yeşil mum en az % kaç yükselmeli (kapanış/açılış)
+PREV_GREEN = 15            # önceki kaç YEŞİL mumda %5 artış olmamalı
+PREV_MAX_PCT = 5.0         # bu yeşil mumlardan hiçbiri bu yükselişe ulaşmamalı
+FETCH_LIMIT = 100          # yeşil mumları bulmak için kaç mum çekilsin
 
 # --- ÇALIŞMA ---
 SCAN_SECONDS = 30          # kaç saniyede bir taransın
@@ -91,7 +92,7 @@ def check(symbol):
     time.sleep(REQ_SLEEP)
     k = get("/api/v2/mix/market/candles",
             {"symbol": symbol, "productType": PRODUCT,
-             "granularity": INTERVAL, "limit": PREV_CANDLES + 5})
+             "granularity": INTERVAL, "limit": FETCH_LIMIT})
     if not k:
         return None
     try:
@@ -105,24 +106,25 @@ def check(symbol):
 
     now_ms = int(time.time() * 1000)
     closed = [r for r in rows if r["ts"] + INTERVAL_MS <= now_ms]   # sadece kapanmış mumlar
-    if len(closed) < PREV_CANDLES + 1:
+    if len(closed) < 2:
         return None
 
     last = closed[-1]                        # az önce kapanan mum
     cur_start = now_ms // INTERVAL_MS * INTERVAL_MS
     if last["ts"] != cur_start - INTERVAL_MS:
         return None                          # hemen önceki mum değilse (eski) bakma
-    if last["o"] <= 0:
-        return None
+    if last["o"] <= 0 or last["c"] <= last["o"]:
+        return None                          # sadece yeşil kapanan mumlar
 
     candle_pct = (last["c"] / last["o"] - 1) * 100
     if candle_pct < MIN_CANDLE_PCT:
         return None
 
-    prev = closed[-(PREV_CANDLES + 1):-1]    # ondan önceki 30 kapanmış mum
-    for r in prev:
-        if r["o"] <= 0:
-            return None
+    # sinyal mumundan önceki son 15 yeşil mum (kırmızılar atlanır)
+    greens = [r for r in closed[:-1] if r["o"] > 0 and r["c"] > r["o"]][-PREV_GREEN:]
+    if len(greens) < PREV_GREEN:
+        return None                          # yeterli geçmiş yok
+    for r in greens:
         if (r["c"] / r["o"] - 1) * 100 >= PREV_MAX_PCT:
             return None
 
@@ -223,7 +225,7 @@ def main(sent_data):
             f"Kapanış: {fmt(price)}\n"
             f"Kapanan {INTERVAL} mum: +{candle_pct:.1f}% ({fmt(open_p)} -> {fmt(price)})\n"
             f"Mum tepesi: {fmt(high_p)}\n"
-            f"Önceki {PREV_CANDLES} mumda %{PREV_MAX_PCT:g} artış yok\n"
+            f"Önceki {PREV_GREEN} yeşil mumda %{PREV_MAX_PCT:g} artış yok\n"
             f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}"
         )
 
