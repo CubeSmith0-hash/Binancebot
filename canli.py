@@ -20,7 +20,7 @@ REQ_SLEEP = 0.2
 
 # --- PUMP AYARLARI ---
 MIN_CANDLE_PCT = 5.0       # kapanan yeşil mum en az % kaç yükselmeli (kapanış/açılış)
-PREV_GREEN = 15            # önceki kaç YEŞİL mumda %5 artış olmamalı
+PREV_GREEN = 5            # önceki kaç YEŞİL mumda %5 artış olmamalı
 PREV_MAX_PCT = 5.0         # bu yeşil mumlardan hiçbiri bu yükselişe ulaşmamalı
 FETCH_LIMIT = 100          # yeşil mumları bulmak için kaç mum çekilsin
 
