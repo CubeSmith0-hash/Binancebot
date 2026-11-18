@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -9,24 +9,26 @@ import requests
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))  # ne kadar süre çalışsın
-POLL_SEC = 1               # kaç saniyede bir taransın
-WINDOW_SEC = 250           # son kaç saniyeye bakılsın
-MIN_PCT = 3.0              # pencere içindeki dipten en az % kaç yükseliş
-MAX_PCT = 4.0            # pencere içindeki dipten en fazla % kaç yükseliş (üst sınır)
-VOL_MULT = 1.0             # pencere hacmi, normal hacmin en az kaç katı olmalı
-VOL_MAX = 20.0             # pencere hacmi, normal hacmin en fazla kaç katı olabilir (üst sınır)
-MIN_WINDOW_VOL = 5_000     # pencerede en az bu kadar USDT hacim olmalı
+INTERVAL = "15m"
+INTERVAL_MIN = 15
+INTERVAL_MS = INTERVAL_MIN * 60000
 MIN_24H_VOL = 50_000       # 24 saatlik USDT hacmi bunun altındaki coinler taranmaz
-COOLDOWN_MIN = 5           # aynı coin için tekrar sinyal bekleme süresi (dk)
-HISTORY_SEC = WINDOW_SEC + 30
 TZ = timezone(timedelta(hours=3))
-STATE_FILE = "canli_state.json"
+STATE_FILE = "pump15_state.json"
+WORKERS = 4
+REQ_SLEEP = 0.2
 
-# Bitget USDT-M Futures
+# --- PUMP AYARLARI ---
+MIN_CANDLE_PCT = 5.0       # kapanan mum en az % kaç yükselmeli (kapanış/açılış)
+PREV_CANDLES = 30          # önceki kaç mumda %5 artış olmamalı
+PREV_MAX_PCT = 5.0         # önceki mumlardan hiçbiri bu yükselişe ulaşmamalı
+
+# --- ÇALIŞMA ---
+SCAN_SECONDS = 30          # kaç saniyede bir taransın
+RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "345"))  # workflow timeout'tan (355 dk) kısa olmalı
+
 HOST = "https://api.bitget.com"
-TICKER_PATH = "/api/v2/mix/market/tickers"
-TICKER_PARAMS = {"productType": "USDT-FUTURES"}
+PRODUCT = "USDT-FUTURES"
 
 STABLES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "USD1",
@@ -41,20 +43,90 @@ STOCKS = {
 }
 NON_CRYPTO = {"PAXG", "XAUT"}
 
-HISTORY = {}      # sembol -> deque[(zaman, fiyat, 24s_usdt_hacim)]
-LAST_ALERT = {}   # sembol -> son sinyal zamanı
-WATCH = set()     # taranacak semboller
+
+def get(path, params=None):
+    for attempt in range(3):
+        try:
+            r = requests.get(HOST + path, params=params, timeout=20)
+        except requests.RequestException as e:
+            print("hata", path, e)
+            time.sleep(1)
+            continue
+        if r.status_code == 429:
+            time.sleep(1 + attempt)
+            continue
+        if r.status_code != 200:
+            print("HTTP", r.status_code, path)
+            if r.status_code in (403, 451):
+                print("bu sunucunun IP'si Bitget tarafından engelli")
+            return None
+        try:
+            body = r.json()
+        except ValueError:
+            return None
+        if body.get("code") != "00000":
+            print("API hatası:", path, body.get("code"), body.get("msg"))
+            return None
+        return body.get("data")
+    return None
 
 
-def keep(sym):
+def keep(c):
+    sym = c.get("symbol", "")
     if not sym.endswith("USDT"):
         return False
-    base = sym[:-4]
+    if c.get("symbolStatus", "normal") != "normal":
+        return False
+    if c.get("symbolType", "perpetual") != "perpetual":
+        return False
+    base = c.get("baseCoin") or sym[:-4]
     if base in STABLES or base in NON_CRYPTO or base in STOCKS:
         return False
     if base.endswith("B") and base[:-1] in STOCKS:
         return False
     return True
+
+
+def check(symbol):
+    time.sleep(REQ_SLEEP)
+    k = get("/api/v2/mix/market/candles",
+            {"symbol": symbol, "productType": PRODUCT,
+             "granularity": INTERVAL, "limit": PREV_CANDLES + 5})
+    if not k:
+        return None
+    try:
+        # [ts, open, high, low, close, baseVol, quoteVol]
+        rows = sorted(
+            ({"ts": int(c[0]), "o": float(c[1]), "h": float(c[2]),
+              "l": float(c[3]), "c": float(c[4])} for c in k),
+            key=lambda x: x["ts"])
+    except (IndexError, ValueError, TypeError):
+        return None
+
+    now_ms = int(time.time() * 1000)
+    closed = [r for r in rows if r["ts"] + INTERVAL_MS <= now_ms]   # sadece kapanmış mumlar
+    if len(closed) < PREV_CANDLES + 1:
+        return None
+
+    last = closed[-1]                        # az önce kapanan mum
+    cur_start = now_ms // INTERVAL_MS * INTERVAL_MS
+    if last["ts"] != cur_start - INTERVAL_MS:
+        return None                          # hemen önceki mum değilse (eski) bakma
+    if last["o"] <= 0:
+        return None
+
+    candle_pct = (last["c"] / last["o"] - 1) * 100
+    if candle_pct < MIN_CANDLE_PCT:
+        return None
+
+    prev = closed[-(PREV_CANDLES + 1):-1]    # ondan önceki 30 kapanmış mum
+    for r in prev:
+        if r["o"] <= 0:
+            return None
+        if (r["c"] / r["o"] - 1) * 100 >= PREV_MAX_PCT:
+            return None
+
+    return (symbol, last["c"], last["o"], last["h"], candle_pct, last["ts"])
 
 
 def fmt(p):
@@ -88,175 +160,90 @@ def send(text):
             time.sleep(2)
 
 
-def _is_num(x):
-    return isinstance(x, (int, float)) and not isinstance(x, bool)
-
-
 def load_state():
-    """State dosyasını okur. Değer liste/bozuk olsa bile çökmez, sadece geçerli
-    sayısal zamanları alır."""
-    if not os.path.exists(STATE_FILE):
-        return {}
-    try:
-        with open(STATE_FILE, "r") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-
-    limit = time.time() - COOLDOWN_MIN * 60
-    out = {}
-    for k, v in data.items():
-        if isinstance(v, (list, tuple)):
-            nums = [x for x in v if _is_num(x)]
-            v = max(nums) if nums else None
-        if _is_num(v) and v > limit:
-            out[k] = float(v)
-    return out
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                raw = json.load(f)
+            limit = time.time() * 1000 - 24 * 3600 * 1000
+            return {
+                k: v for k, v in raw.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v > limit
+            }
+        except (OSError, ValueError, AttributeError):
+            pass
+    return {}
 
 
-def save_state():
+def save_state(data):
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump(LAST_ALERT, f)
+            json.dump(data, f)
     except OSError as e:
         print("state yazılamadı", e)
 
 
-def fetch_snapshot():
-    """(durum_kodu, {sembol: (fiyat, 24s_usdt_hacim)}) döndürür."""
-    try:
-        r = requests.get(HOST + TICKER_PATH, params=TICKER_PARAMS, timeout=15)
-    except requests.RequestException as e:
-        print("hata", e)
-        return 0, None
-    if r.status_code != 200:
-        print("HTTP", r.status_code, TICKER_PATH)
-        if r.status_code in (403, 451):
-            print("bu sunucunun IP'si Bitget tarafından engelli")
-        return r.status_code, None
-    try:
-        body = r.json()
-    except ValueError:
-        print("json okunamadı")
-        return 0, None
-    if body.get("code") != "00000":
-        print("API hatası:", body.get("code"), body.get("msg"))
-        return 0, None
-    out = {}
-    for t in body.get("data", []):
-        try:
-            vol = t.get("usdtVolume") or t.get("quoteVolume")
-            out[t["symbol"]] = (float(t["lastPr"]), float(vol))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return 200, out
-
-
-def refresh_symbols(snap):
-    WATCH.clear()
-    for sym, (_, vol24) in snap.items():
-        if keep(sym) and vol24 >= MIN_24H_VOL:
-            WATCH.add(sym)
-    print(f"{len(WATCH)} Bitget vadeli coin izleniyor")
-
-
-def evaluate(hist, now):
-    pts = [p for p in hist if p[0] >= now - WINDOW_SEC]
-    if len(pts) < 3 or now - pts[0][0] < WINDOW_SEC * 0.6:
-        return None   # henüz yeterli geçmiş yok
-    low = min(p[1] for p in pts)
-    last_p, last_q = pts[-1][1], pts[-1][2]
-    if low <= 0 or last_p <= low:
-        return None
-    pct = (last_p / low - 1) * 100
-    if pct < MIN_PCT or pct > MAX_PCT:
-        return None
-    vol = last_q - pts[0][2]          # penceredeki yaklaşık USDT hacmi
-    if vol < MIN_WINDOW_VOL:
-        return None
-    normal = last_q / 1440 * (WINDOW_SEC / 60)   # aynı sürede normal hacim
-    if normal <= 0:
-        return None
-    mult = vol / normal
-    if mult < VOL_MULT or mult > VOL_MAX:
-        return None
-    return last_p, pct, vol, mult
-
-
-def process(snapshot, now):
-    """Anlık veriyi geçmişe ekler, şartı sağlayan coinleri döndürür."""
-    signals = []
-    for sym in WATCH:
-        d = snapshot.get(sym)
-        if not d:
-            continue
-        h = HISTORY.setdefault(sym, deque())
-        h.append((now, d[0], d[1]))
-        while h and h[0][0] < now - HISTORY_SEC:
-            h.popleft()
-        res = evaluate(h, now)
-        if not res:
-            continue
-        last = LAST_ALERT.get(sym)
-        if last and now - last < COOLDOWN_MIN * 60:
-            continue
-        signals.append((sym, d[1]) + res)
-    return signals
-
-
-def alert(sym, vol24, price, pct, vol, mult):
-    LAST_ALERT[sym] = time.time()
-    save_state()
-    t = datetime.now(TZ).strftime("%H:%M:%S")
-    send(
-        f"⚡ ANLIK PUMP {sym} (Bitget Vadeli)\n"
-        f"Saat: {t}\n"
-        f"Fiyat: {fmt(price)}\n"
-        f"Son {WINDOW_SEC} sn: +{pct:.1f}%\n"
-        f"Bu sürede hacim: {fmt_vol(vol)} USDT ({mult:.1f}x normal)\n"
-        f"24s hacim: {fmt_vol(vol24)}"
-    )
-
-
-def main():
-    LAST_ALERT.update(load_state())
-    save_state()   # dosya her durumda oluşsun
-
-    status, snap = fetch_snapshot()
-    if not snap:
-        print("veri alınamadı, durum:", status)
+def main(sent_data):
+    contracts = get("/api/v2/mix/market/contracts", {"productType": PRODUCT})
+    if not contracts:
+        print("Borsa verisi alınamadı")
         return
-    refresh_symbols(snap)
 
-    end = time.time() + LOOP_MINUTES * 60
-    last_refresh = time.time()
-    fails = 0
-    while time.time() < end:
-        t0 = time.time()
-        status, snap = fetch_snapshot()
-        if snap:
-            fails = 0
-            now = time.time()
-            if now - last_refresh > 600:
-                refresh_symbols(snap)
-                last_refresh = now
-            for sig in process(snap, now):
-                alert(*sig)
-        else:
-            fails += 1
-            if fails >= 30:
-                print("art arda 30 hata, çıkılıyor")
-                break
-            time.sleep(5)
-        wait = POLL_SEC - (time.time() - t0)
-        if wait > 0:
-            time.sleep(wait)
+    tick = get("/api/v2/mix/market/tickers", {"productType": PRODUCT}) or []
+    vol24 = {}
+    for t in tick:
+        try:
+            vol24[t["symbol"]] = float(t.get("usdtVolume") or t.get("quoteVolume") or 0)
+        except (KeyError, ValueError, TypeError):
+            continue
 
-    save_state()
+    symbols = [c["symbol"] for c in contracts if keep(c)]
+    if vol24:
+        symbols = [s for s in symbols if vol24.get(s, 0) >= MIN_24H_VOL]
+    print(f"{len(symbols)} coin taranıyor")
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        results = [r for r in ex.map(check, symbols) if r]
+    results.sort(key=lambda x: -x[4])
+    print(f"{len(results)} sinyal bulundu")
+
+    limit = time.time() * 1000 - 24 * 3600 * 1000
+    for k in [k for k, v in sent_data.items() if v < limit]:
+        del sent_data[k]
+
+    for symbol, price, open_p, high_p, candle_pct, ts in results:
+        key = f"{symbol}_{ts}"              # aynı mum için tek mesaj
+        if key in sent_data:
+            continue
+
+        t = datetime.now(TZ).strftime("%H:%M:%S")
+        send(
+            f"⚡ ANLIK PUMP {symbol} (Bitget Vadeli)\n"
+            f"Saat: {t}\n"
+            f"Kapanış: {fmt(price)}\n"
+            f"Kapanan {INTERVAL} mum: +{candle_pct:.1f}% ({fmt(open_p)} -> {fmt(price)})\n"
+            f"Mum tepesi: {fmt(high_p)}\n"
+            f"Önceki {PREV_CANDLES} mumda %{PREV_MAX_PCT:g} artış yok\n"
+            f"24s hacim: {fmt_vol(vol24.get(symbol, 0))}"
+        )
+
+        sent_data[key] = int(time.time() * 1000)
+        save_state(sent_data)
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":
-    main()
-            
+    end = time.time() + RUN_MINUTES * 60
+    sent = load_state()
+    save_state(sent)   # dosya her durumda oluşsun
+    print("bot başladı")
+    while True:
+        try:
+            main(sent)
+        except Exception as e:
+            print("hata:", e)
+        wait = SCAN_SECONDS - (time.time() % SCAN_SECONDS)
+        if time.time() + wait > end:
+            break
+        time.sleep(wait)
+    print("süre doldu, workflow yeniden başlayacak")
