@@ -1,0 +1,44 @@
+name: pump-bot
+
+on:
+  schedule:
+    - cron: "0 * * * *"     # her saat bir tetiklenir; concurrency sayesinde çalışan bitince sıradaki başlar
+  workflow_dispatch:         # elle başlatmak için
+
+# Aynı anda tek bot çalışır. Yeni tetikleme çalışanı iptal etmez, sırada bekler
+# (sırada en fazla 1 tane tutulur), böylece bot neredeyse kesintisiz çalışır.
+concurrency:
+  group: pump-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355     # bot.py içindeki RUN_MINUTES (345) bundan kısa olmalı
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bağımlılıkları kur
+        run: pip install requests
+
+      # Gönderilen sinyal kayıtları (sent_signals.json) çalışmalar arasında korunur
+      - name: Sinyal kayıtlarını geri yükle
+        uses: actions/cache@v4
+        with:
+          path: sent_signals.json
+          key: signals-${{ github.run_id }}
+          restore-keys: |
+            signals-
+
+      - name: Botu çalıştır
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -u bot.py
