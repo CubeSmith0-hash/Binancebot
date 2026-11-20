@@ -2,7 +2,7 @@
 Sniper (PAPER TRADING) v3 - 3 saatlik oturum.
 Sanal bakiye 10$, coin basina en fazla bakiyenin %30'u, en fazla 100 islem.
 Yenilikler: RugCheck KALDIRILDI, %30 pozisyon limiti, -%25 stop loss,
-3 parcada kar alma (+30% / +60% / +100%, her seferinde 1/3).
+tek seviyeden kar alma (+%30'da tamami satilir).
 Gercek para / private key KULLANMAZ.
 """
 import csv
@@ -43,9 +43,9 @@ MAX_FDV = 5_000_000
 FEE_PCT = 4.0               # alim ve satim basina ucret + slippage varsayimi (%)
 LIQ_EXIT_EXTRA_SLIP = 10.0  # likidite dususunde satis icin ek kayip (%)
 STOP_LOSS_PCT = 25.0        # girise gore -%25'te tamamini sat
-TP_LEVELS = [30.0, 60.0, 100.0]   # 3 parcali kar alma (girise gore %)
-TP_PART = 1 / 3             # her seviyede ilk pozisyonun 1/3'u satilir
-TRAIL_PCT = 15.0            # sadece ilk kar alindiktan sonra aktif (kalan kisim icin)
+TAKE_PROFIT_PCT = 30.0      # girise gore +%30'da pozisyonun TAMAMI satilir
+USE_TRAIL = False           # istersen True yap: zirveden TRAIL_PCT dususte cikar
+TRAIL_PCT = 15.0
 SELL_RATIO_EXIT = 0.60
 MIN_TX_FOR_PRESSURE = 6
 LIQ_DROP_EXIT = 30.0        # ilk takip olcumune gore, ust uste 2 olcumde dogrulanirsa
@@ -176,14 +176,13 @@ def open_trade(s):
     TRADED_MINTS.add(s["mint"])
     OPEN[s["id"]] = {"net": s["net"], "addr": s["addr"], "name": s["name"],
                      "entry": s["price"], "liq": None, "liq_strikes": 0,
-                     "size": size, "rem": 1.0, "proceeds": 0.0, "tp_hit": 0,
+                     "size": size, "rem": 1.0, "proceeds": 0.0,
                      "ts": time.time(), "seen": time.time(),
                      "max": s["price"], "min": s["price"]}
     send(
         f"🎯 SANAL ALIM #{STATE['opened']}/{MAX_TRADES} {s['name']} ({s['net']})\n"
         f"Giris: ${fmt_price(s['price'])} | {size:.2f}$ (bakiyenin %{size / equity() * 100:.0f}'i, sanal)\n"
-        f"Stop: -%{STOP_LOSS_PCT:.0f} | Kar al: "
-        + " / ".join(f"+%{x:.0f}" for x in TP_LEVELS) + "\n"
+        f"Stop: -%{STOP_LOSS_PCT:.0f} | Kar al: +%{TAKE_PROFIT_PCT:.0f}\n"
         f"Yas: {s['age']:.0f} dk | Likidite: {s['liq']/1e3:.0f}K$ | FDV: {s['fdv']/1e3:.0f}K$\n"
         f"5dk hacim: {s['v5']/1e3:.1f}K$ | Alici: {s['buyers']} | Alim: %{s['ratio']*100:.0f}\n"
         f"Kasa: {STATE['cash']:.2f}$\n"
@@ -198,19 +197,6 @@ def portion_proceeds(t, price, frac):
         return 0.0
     gross = price / t["entry"] - 1
     return t["size"] * frac * (1 + gross) * (1 - FEE_PCT / 100) / (1 + FEE_PCT / 100)
-
-
-def take_partial(pid, price, label):
-    t = OPEN[pid]
-    frac = min(TP_PART, t["rem"])
-    got = portion_proceeds(t, price, frac)
-    t["rem"] -= frac
-    t["proceeds"] += got
-    STATE["cash"] += got
-    gain = (price / t["entry"] - 1) * 100
-    send(f"💰 KISMI KAR {t['name']} ({label})\n"
-         f"Fiyat girise gore: {gain:+.0f}% | Satilan: 1/3 ({got:.2f}$)\n"
-         f"Kalan: %{t['rem'] * 100:.0f} | Kasa: {STATE['cash']:.2f}$")
 
 
 def close_trade(pid, price, reason):
@@ -251,26 +237,13 @@ def exit_reason(t, price, attrs):
             return "LIKIDITE_DUSTU"
     if (price / t["entry"] - 1) * 100 <= -STOP_LOSS_PCT:
         return "STOP_LOSS"
-    # Trailing sadece ilk kar alindiktan sonra (yoksa -%25 stop'tan once tetiklenirdi)
-    if t["tp_hit"] >= 1 and (1 - price / t["max"]) * 100 >= TRAIL_PCT:
+    if (price / t["entry"] - 1) * 100 >= TAKE_PROFIT_PCT:
+        return "TAKE_PROFIT"
+    if USE_TRAIL and t["max"] > t["entry"] and (1 - price / t["max"]) * 100 >= TRAIL_PCT:
         return "ZIRVEDEN_DUSUS"
     if tot >= MIN_TX_FOR_PRESSURE and sells / tot >= SELL_RATIO_EXIT:
         return "SATIS_BASKISI"
     return None
-
-
-def check_take_profit(pid, price):
-    """Fiyat birden fazla seviyeyi gectiyse hepsini sirayla isler."""
-    t = OPEN[pid]
-    while t["tp_hit"] < len(TP_LEVELS):
-        gain = (price / t["entry"] - 1) * 100
-        if gain < TP_LEVELS[t["tp_hit"]]:
-            break
-        t["tp_hit"] += 1
-        if t["tp_hit"] == len(TP_LEVELS):
-            close_trade(pid, price, f"TP{t['tp_hit']}_KALAN_SATILDI")
-            return
-        take_partial(pid, price, f"TP{t['tp_hit']} +%{TP_LEVELS[t['tp_hit'] - 1]:.0f}")
 
 
 def track_open(force=False):
@@ -298,8 +271,6 @@ def track_open(force=False):
                     close_trade(pid, price, reason)
                 elif force:
                     close_trade(pid, price, "OTURUM_BITTI")
-                else:
-                    check_take_profit(pid, price)
     for pid in [p for p, t in OPEN.items() if time.time() - t["seen"] > NO_DATA_MIN * 60]:
         close_trade(pid, 0, "VERI_YOK_SIFIR")
 
@@ -360,7 +331,7 @@ def main():
     end = t_start + RUN_MINUTES * 60
     next_interim = t_start + INTERIM_MIN * 60
     send(f"🚀 Sanal sniper v3 basladi: {START_BALANCE:.0f}$ kasa, coin basina max %{MAX_POS_PCT:.0f}, "
-         f"stop -%{STOP_LOSS_PCT:.0f}, 3 parca kar alma, max {MAX_TRADES} islem, {RUN_MINUTES} dk.")
+         f"stop -%{STOP_LOSS_PCT:.0f}, kar al +%{TAKE_PROFIT_PCT:.0f}, max {MAX_TRADES} islem, {RUN_MINUTES} dk.")
     backoff = 0
     while time.time() < end:
         t0 = time.time()
