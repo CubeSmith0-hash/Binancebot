@@ -41,7 +41,7 @@ MAX_FDV = 5_000_000
 # Cikis kurallari
 FEE_PCT = 4.0               # alim ve satim basina ucret + slippage varsayimi (%)
 STOP_LOSS_PCT = 50.0        # girise gore -%50'de tamamini sat
-TAKE_PROFIT_PCT = 30.0      # girise gore +%30'da pozisyonun TAMAMI satilir
+TAKE_PROFIT_PCT = 1000.0      # girise gore +%30'da pozisyonun TAMAMI satilir
 NO_DATA_MIN = 15
 # -----------------------------------------
 
