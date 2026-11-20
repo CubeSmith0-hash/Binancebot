@@ -20,8 +20,9 @@ LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "330"))
 
 # ---------------- AYARLAR (sert pump) ----------------
 NETWORKS = ["solana", "base"]        # "bsc", "eth" ekleyebilirsiniz (istek sayisi artar)
-POLL_SEC = 60                        # cache 60 sn, daha sik cekmek anlamsiz
-SOURCES = ["trending", "new", "top"] # hangi listeler taransin
+POLL_SEC = 5                         # tur bitince ek bekleme (tur zaten ~50 sn surer)
+SOURCES = ["trending", "new"]        # "top" 429 yaptigi icin cikarildi
+REQ_GAP = 12                         # istekler arasi bekleme (sn)
 
 MIN_PCT_M5 = 8.0          # son 5 dk fiyat artisi en az %
 MAX_PCT_M5 = 150.0        # bunun ustu genelde gec / manipulasyon
@@ -215,12 +216,11 @@ def scan_once():
             status, pools = fetch(net, src)
             if status == 429:
                 rate_limited = True
-                break
+                time.sleep(30)
+                continue
             for p in pools:
                 seen[p.get("id")] = p
-            time.sleep(1.5)   # istekler arasi nefes
-        if rate_limited:
-            break
+            time.sleep(REQ_GAP)
 
     signals = []
     for pid, p in seen.items():
@@ -249,7 +249,7 @@ def main():
             except Exception as e:
                 print("sinyal hatasi", e)
         if limited:
-            backoff = min(backoff + 60, 300)
+            backoff = min(backoff + 30, 60)
             print(f"429 limit, {backoff} sn ek bekleme", flush=True)
         else:
             backoff = 0
@@ -259,4 +259,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                                 
+    
