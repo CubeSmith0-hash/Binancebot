@@ -1,9 +1,9 @@
 """
-Sniper (PAPER TRADING) v3 - 3 saatlik oturum.
-Sanal bakiye 10$, coin basina en fazla bakiyenin %30'u, en fazla 100 islem.
-Yenilikler: RugCheck KALDIRILDI, %30 pozisyon limiti, -%25 stop loss,
-tek seviyeden kar alma (+%30'da tamami satilir).
-Gercek para / private key KULLANMAZ.
+Sniper (PAPER TRADING) v6 - 3 saatlik oturum.
+Sanal bakiye 10$, her islem sabit 1$. SADECE iki cikis: TP +%30 veya SL -%50 (fiyat o an cikar).
+Yeni coin cikinca filtreden geciyorsa hemen 1$ ile girer (kasa yettigi surece, ayni anda en fazla MAX_OPEN).
+Ayni coin (mint ve isim) bir daha alinmaz; liste dosyaya yazilir.
+RugCheck yok. Gercek para / private key KULLANMAZ.
 """
 import csv
 import os
@@ -19,15 +19,14 @@ RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "180"))
 
 # ---------------- AYARLAR ----------------
 NETWORKS = ["solana"]
-POLL_SEC = 5
-REQ_GAP = 10
+POLL_SEC = 1
+REQ_GAP = 4               # tek pozisyon oldugu icin dakikada ~15 istek, limit icinde
 INTERIM_MIN = 60            # her 60 dk'da ara rapor
 
 START_BALANCE = 10.0
-MAX_POS_PCT = 30.0          # tek coine en fazla bakiyenin %30'u
-MIN_TRADE_USD = 0.5         # kasada bundan az kalirsa yeni islem acilmaz
+TRADE_USD = 1.0            # her islem sabit 1$ (bakiyenin %30 limitinin altinda)
 MAX_TRADES = 100
-MAX_OPEN = 10
+MAX_OPEN = 10               # 1$/islem, 10$ kasa: ayni anda en fazla 10 (1 yaparsan tek pozisyon)
 
 # Giris filtresi
 MIN_AGE_MIN = 0
@@ -41,14 +40,8 @@ MAX_FDV = 5_000_000
 
 # Cikis kurallari
 FEE_PCT = 4.0               # alim ve satim basina ucret + slippage varsayimi (%)
-LIQ_EXIT_EXTRA_SLIP = 10.0  # likidite dususunde satis icin ek kayip (%)
-STOP_LOSS_PCT = 25.0        # girise gore -%25'te tamamini sat
+STOP_LOSS_PCT = 50.0        # girise gore -%50'de tamamini sat
 TAKE_PROFIT_PCT = 30.0      # girise gore +%30'da pozisyonun TAMAMI satilir
-USE_TRAIL = False           # istersen True yap: zirveden TRAIL_PCT dususte cikar
-TRAIL_PCT = 15.0
-SELL_RATIO_EXIT = 0.60
-MIN_TX_FOR_PRESSURE = 6
-LIQ_DROP_EXIT = 30.0        # ilk takip olcumune gore, ust uste 2 olcumde dogrulanirsa
 NO_DATA_MIN = 15
 # -----------------------------------------
 
@@ -60,6 +53,36 @@ LOG_FILE = "paper_log.csv"
 OPEN = {}
 SEEN = set()
 TRADED_MINTS = set()
+TRADED_NAMES = set()
+TRADED_FILE = "traded_mints.txt"
+
+
+def base_name(name):
+    return str(name).split(" / ")[0].strip().lower()
+
+
+def load_traded():
+    try:
+        with open(TRADED_FILE) as fh:
+            for line in fh:
+                mint, _, nm = line.rstrip("\n").partition("\t")
+                if mint:
+                    TRADED_MINTS.add(mint)
+                if nm:
+                    TRADED_NAMES.add(nm)
+    except OSError:
+        pass
+
+
+def save_traded(mint, nm):
+    try:
+        with open(TRADED_FILE, "a") as fh:
+            fh.write(f"{mint}\t{nm}\n")
+    except OSError as e:
+        print("dosya hatasi", e)
+
+
+load_traded()
 RESULTS = []
 STATE = {"cash": START_BALANCE, "opened": 0}
 
@@ -136,7 +159,7 @@ def entry_ok(p):
         return None
     base = (((p.get("relationships") or {}).get("base_token") or {}).get("data") or {}).get("id", "")
     mint = base.split("_", 1)[1] if "_" in base else ""
-    if not mint or mint in TRADED_MINTS:
+    if not mint or mint in TRADED_MINTS or base_name(a.get("name", "")) in TRADED_NAMES:
         return None
     vol = a.get("volume_usd", {}) or {}
     tx5 = (a.get("transactions", {}) or {}).get("m5", {}) or {}
@@ -167,15 +190,16 @@ def entry_ok(p):
 
 
 def open_trade(s):
-    # Pozisyon boyutu: toplam bakiyenin %30'u, kasadaki nakitle sinirli
-    size = min(equity() * MAX_POS_PCT / 100, STATE["cash"])
-    if size < MIN_TRADE_USD:
+    size = min(TRADE_USD, STATE["cash"])
+    if size < TRADE_USD:
         return False
     STATE["opened"] += 1
     STATE["cash"] -= size
     TRADED_MINTS.add(s["mint"])
+    TRADED_NAMES.add(base_name(s["name"]))
+    save_traded(s["mint"], base_name(s["name"]))
     OPEN[s["id"]] = {"net": s["net"], "addr": s["addr"], "name": s["name"],
-                     "entry": s["price"], "liq": None, "liq_strikes": 0,
+                     "entry": s["price"],
                      "size": size, "rem": 1.0, "proceeds": 0.0,
                      "ts": time.time(), "seen": time.time(),
                      "max": s["price"], "min": s["price"]}
@@ -201,8 +225,6 @@ def portion_proceeds(t, price, frac):
 
 def close_trade(pid, price, reason):
     t = OPEN.pop(pid)
-    if price > 0 and reason == "LIKIDITE_DUSTU":
-        price *= 1 - LIQ_EXIT_EXTRA_SLIP / 100
     got = portion_proceeds(t, price, t["rem"])
     t["proceeds"] += got
     STATE["cash"] += got
@@ -221,28 +243,12 @@ def close_trade(pid, price, reason):
          f"Kasa: {STATE['cash']:.2f}$")
 
 
-def exit_reason(t, price, attrs):
-    tx5 = (attrs.get("transactions", {}) or {}).get("m5", {}) or {}
-    buys, sells = f(tx5.get("buys")), f(tx5.get("sells"))
-    tot = buys + sells
-    liq = f(attrs.get("reserve_in_usd"))
-    if liq > 0:
-        if t["liq"] is None:
-            t["liq"] = liq            # baslangic: ilk takip olcumu (ayni endpoint, tutarli)
-        elif (1 - liq / t["liq"]) * 100 >= LIQ_DROP_EXIT:
-            t["liq_strikes"] += 1
-        else:
-            t["liq_strikes"] = 0
-        if t["liq_strikes"] >= 2:
-            return "LIKIDITE_DUSTU"
-    if (price / t["entry"] - 1) * 100 <= -STOP_LOSS_PCT:
+def exit_reason(t, price):
+    gain = (price / t["entry"] - 1) * 100
+    if gain <= -STOP_LOSS_PCT:
         return "STOP_LOSS"
-    if (price / t["entry"] - 1) * 100 >= TAKE_PROFIT_PCT:
+    if gain >= TAKE_PROFIT_PCT:
         return "TAKE_PROFIT"
-    if USE_TRAIL and t["max"] > t["entry"] and (1 - price / t["max"]) * 100 >= TRAIL_PCT:
-        return "ZIRVEDEN_DUSUS"
-    if tot >= MIN_TX_FOR_PRESSURE and sells / tot >= SELL_RATIO_EXIT:
-        return "SATIS_BASKISI"
     return None
 
 
@@ -266,7 +272,7 @@ def track_open(force=False):
                     continue
                 t["seen"] = time.time()
                 t["max"], t["min"] = max(t["max"], price), min(t["min"], price)
-                reason = exit_reason(t, price, attrs)
+                reason = exit_reason(t, price)
                 if reason:
                     close_trade(pid, price, reason)
                 elif force:
@@ -285,7 +291,7 @@ def scan_new():
             time.sleep(30)
             continue
         for p in pools:
-            if STATE["opened"] >= MAX_TRADES or len(OPEN) >= MAX_OPEN or STATE["cash"] < MIN_TRADE_USD:
+            if STATE["opened"] >= MAX_TRADES or len(OPEN) >= MAX_OPEN or STATE["cash"] < TRADE_USD:
                 break
             s = entry_ok(p)
             if not s:
@@ -330,16 +336,16 @@ def main():
     t_start = time.time()
     end = t_start + RUN_MINUTES * 60
     next_interim = t_start + INTERIM_MIN * 60
-    send(f"🚀 Sanal sniper v3 basladi: {START_BALANCE:.0f}$ kasa, coin basina max %{MAX_POS_PCT:.0f}, "
+    send(f"🚀 Sanal sniper v3 basladi: {START_BALANCE:.0f}$ kasa, islem basi {TRADE_USD:.0f}$, tek pozisyon, "
          f"stop -%{STOP_LOSS_PCT:.0f}, kar al +%{TAKE_PROFIT_PCT:.0f}, max {MAX_TRADES} islem, {RUN_MINUTES} dk.")
     backoff = 0
     while time.time() < end:
         t0 = time.time()
         rl = False
-        if STATE["opened"] < MAX_TRADES:
-            rl = scan_new()
         if OPEN:
-            track_open()
+            track_open()          # TP / SL aninda cikis
+        if STATE["opened"] < MAX_TRADES and len(OPEN) < MAX_OPEN:
+            rl = scan_new()       # pozisyon bossa hemen yeni coine gir
         if time.time() >= next_interim and time.time() < end - 300:
             report("ARA RAPOR", (time.time() - t_start) / 60)
             next_interim += INTERIM_MIN * 60
