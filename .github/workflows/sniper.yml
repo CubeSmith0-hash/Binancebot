@@ -15,7 +15,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          RUN_MINUTES: "180"
+          RUN_MINUTES: "600"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
