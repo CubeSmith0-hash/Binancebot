@@ -1,8 +1,8 @@
 """
-Sniper (PAPER TRADING) v2 - 3 saatlik oturum.
-Sanal bakiye 10$, islem basi 1$, en fazla 100 islem (kasa kapanan islemlerle geri doner).
-Yenilikler: RugCheck filtresi, ayni token tekrar alinmaz, yuksek slippage varsayimi,
-likidite dususu 2 kez dogrulanir, raporda medyan / kazanc orani / en iyi islem haric ortalama.
+Sniper (PAPER TRADING) v3 - 3 saatlik oturum.
+Sanal bakiye 10$, coin basina en fazla bakiyenin %30'u, en fazla 100 islem.
+Yenilikler: RugCheck KALDIRILDI, %30 pozisyon limiti, -%25 stop loss,
+3 parcada kar alma (+30% / +60% / +100%, her seferinde 1/3).
 Gercek para / private key KULLANMAZ.
 """
 import csv
@@ -24,7 +24,8 @@ REQ_GAP = 10
 INTERIM_MIN = 60            # her 60 dk'da ara rapor
 
 START_BALANCE = 10.0
-TRADE_USD = 1.0
+MAX_POS_PCT = 30.0          # tek coine en fazla bakiyenin %30'u
+MIN_TRADE_USD = 0.5         # kasada bundan az kalirsa yeni islem acilmaz
 MAX_TRADES = 100
 MAX_OPEN = 10
 
@@ -38,17 +39,13 @@ MIN_BUY_RATIO = 0.55
 MAX_VOL_LIQ = 60.0
 MAX_FDV = 5_000_000
 
-# RugCheck (Solana, anahtar gerekmez)
-USE_RUGCHECK = True
-RC_MAX_SCORE = 50           # score_normalised bunun ustundeyse alma (yuksek = riskli)
-RC_IGNORE = ("liquidity", "lp provider")   # yeni tokenda her zaman cikan, elemeyecegimiz uyarilar
-RC_GAP = 3                  # RugCheck istekleri arasi sn
-RC_MAX_TRIES = 3            # rapor henuz yoksa en fazla kac kez tekrar denensin
-
 # Cikis kurallari
 FEE_PCT = 4.0               # alim ve satim basina ucret + slippage varsayimi (%)
 LIQ_EXIT_EXTRA_SLIP = 10.0  # likidite dususunde satis icin ek kayip (%)
-TRAIL_PCT = 15.0
+STOP_LOSS_PCT = 25.0        # girise gore -%25'te tamamini sat
+TP_LEVELS = [30.0, 60.0, 100.0]   # 3 parcali kar alma (girise gore %)
+TP_PART = 1 / 3             # her seviyede ilk pozisyonun 1/3'u satilir
+TRAIL_PCT = 15.0            # sadece ilk kar alindiktan sonra aktif (kalan kisim icin)
 SELL_RATIO_EXIT = 0.60
 MIN_TX_FOR_PRESSURE = 6
 LIQ_DROP_EXIT = 30.0        # ilk takip olcumune gore, ust uste 2 olcumde dogrulanirsa
@@ -58,15 +55,13 @@ NO_DATA_MIN = 15
 TZ = timezone(timedelta(hours=3))
 API = "https://api.geckoterminal.com/api/v2"
 HEADERS = {"Accept": "application/json;version=20230302"}
-RC_URL = "https://api.rugcheck.xyz/v1/tokens/{}/report/summary"
 LOG_FILE = "paper_log.csv"
 
 OPEN = {}
 SEEN = set()
 TRADED_MINTS = set()
-RC_TRIES = {}
 RESULTS = []
-STATE = {"cash": START_BALANCE, "opened": 0, "rejected": 0}
+STATE = {"cash": START_BALANCE, "opened": 0}
 
 
 def f(x, d=0.0):
@@ -103,7 +98,8 @@ def log_row(row):
             w = csv.writer(fh)
             if new:
                 w.writerow(["kapanis", "ag", "isim", "adres", "giris_fiyat", "cikis_fiyat",
-                            "net_getiri_%", "max_getiri_%", "min_getiri_%", "sebep", "sure_dk"])
+                            "boyut_usd", "net_getiri_%", "max_getiri_%", "min_getiri_%",
+                            "sebep", "sure_dk"])
             w.writerow(row)
     except OSError as e:
         print("log hatasi", e)
@@ -124,31 +120,13 @@ def get(url, params=None):
         return 0, []
 
 
-def rugcheck(mint):
-    """(True, ozet) guvenli | (False, sebep) riskli | (None, sebep) belirsiz."""
-    try:
-        r = requests.get(RC_URL.format(mint), timeout=15)
-    except requests.RequestException:
-        return None, "baglanti"
-    if r.status_code == 429:
-        time.sleep(10)
-        return None, "429"
-    if r.status_code != 200:
-        return None, f"HTTP {r.status_code}"
-    try:
-        d = r.json()
-    except ValueError:
-        return None, "json"
-    if d.get("rugged"):
-        return False, "rugged"
-    score = d.get("score_normalised")
-    if isinstance(score, (int, float)) and score > RC_MAX_SCORE:
-        return False, f"risk skoru {score}"
-    for risk in d.get("risks") or []:
-        name = str(risk.get("name", ""))
-        if str(risk.get("level", "")).lower() == "danger" and not any(w in name.lower() for w in RC_IGNORE):
-            return False, name
-    return True, f"skor {score}"
+def open_value():
+    """Acik pozisyonlarin kalan kisminin giris maliyeti."""
+    return sum(t["size"] * t["rem"] for t in OPEN.values())
+
+
+def equity():
+    return STATE["cash"] + open_value()
 
 
 def entry_ok(p):
@@ -188,45 +166,71 @@ def entry_ok(p):
             "ratio": buys / tot, "fdv": fdv, "age": age}
 
 
-def open_trade(s, rc_note):
+def open_trade(s):
+    # Pozisyon boyutu: toplam bakiyenin %30'u, kasadaki nakitle sinirli
+    size = min(equity() * MAX_POS_PCT / 100, STATE["cash"])
+    if size < MIN_TRADE_USD:
+        return False
     STATE["opened"] += 1
-    STATE["cash"] -= TRADE_USD
+    STATE["cash"] -= size
     TRADED_MINTS.add(s["mint"])
     OPEN[s["id"]] = {"net": s["net"], "addr": s["addr"], "name": s["name"],
                      "entry": s["price"], "liq": None, "liq_strikes": 0,
+                     "size": size, "rem": 1.0, "proceeds": 0.0, "tp_hit": 0,
                      "ts": time.time(), "seen": time.time(),
                      "max": s["price"], "min": s["price"]}
     send(
         f"🎯 SANAL ALIM #{STATE['opened']}/{MAX_TRADES} {s['name']} ({s['net']})\n"
-        f"Giris: ${fmt_price(s['price'])} | {TRADE_USD:.0f}$ (sanal)\n"
+        f"Giris: ${fmt_price(s['price'])} | {size:.2f}$ (bakiyenin %{size / equity() * 100:.0f}'i, sanal)\n"
+        f"Stop: -%{STOP_LOSS_PCT:.0f} | Kar al: "
+        + " / ".join(f"+%{x:.0f}" for x in TP_LEVELS) + "\n"
         f"Yas: {s['age']:.0f} dk | Likidite: {s['liq']/1e3:.0f}K$ | FDV: {s['fdv']/1e3:.0f}K$\n"
         f"5dk hacim: {s['v5']/1e3:.1f}K$ | Alici: {s['buyers']} | Alim: %{s['ratio']*100:.0f}\n"
-        f"RugCheck: {rc_note}\n"
         f"Kasa: {STATE['cash']:.2f}$\n"
-        f"https://www.geckoterminal.com/{s['net']}/pools/{s['addr']}\n"
-        f"https://rugcheck.xyz/tokens/{s['mint']}"
+        f"https://www.geckoterminal.com/{s['net']}/pools/{s['addr']}"
     )
+    return True
+
+
+def portion_proceeds(t, price, frac):
+    """Pozisyonun 'frac' kadarini (ilk boyuta oranla) satmaktan gelen net dolar."""
+    if price <= 0:
+        return 0.0
+    gross = price / t["entry"] - 1
+    return t["size"] * frac * (1 + gross) * (1 - FEE_PCT / 100) / (1 + FEE_PCT / 100)
+
+
+def take_partial(pid, price, label):
+    t = OPEN[pid]
+    frac = min(TP_PART, t["rem"])
+    got = portion_proceeds(t, price, frac)
+    t["rem"] -= frac
+    t["proceeds"] += got
+    STATE["cash"] += got
+    gain = (price / t["entry"] - 1) * 100
+    send(f"💰 KISMI KAR {t['name']} ({label})\n"
+         f"Fiyat girise gore: {gain:+.0f}% | Satilan: 1/3 ({got:.2f}$)\n"
+         f"Kalan: %{t['rem'] * 100:.0f} | Kasa: {STATE['cash']:.2f}$")
 
 
 def close_trade(pid, price, reason):
     t = OPEN.pop(pid)
     if price > 0 and reason == "LIKIDITE_DUSTU":
         price *= 1 - LIQ_EXIT_EXTRA_SLIP / 100
-    if price <= 0:
-        net = -100.0
-    else:
-        gross = price / t["entry"] - 1
-        net = ((1 + gross) * (1 - FEE_PCT / 100) / (1 + FEE_PCT / 100) - 1) * 100
-    proceeds = TRADE_USD * (1 + net / 100)
-    STATE["cash"] += proceeds
+    got = portion_proceeds(t, price, t["rem"])
+    t["proceeds"] += got
+    STATE["cash"] += got
+    net = (t["proceeds"] / t["size"] - 1) * 100       # tum parcalar dahil toplam getiri
     mx = (t["max"] / t["entry"] - 1) * 100
     mn = (t["min"] / t["entry"] - 1) * 100
     mins = (time.time() - t["ts"]) / 60
-    RESULTS.append({"name": t["name"], "net": net, "reason": reason, "mins": mins})
+    RESULTS.append({"name": t["name"], "net": net, "reason": reason, "mins": mins,
+                    "pnl": t["proceeds"] - t["size"]})
     log_row([datetime.now(TZ).isoformat(timespec="seconds"), t["net"], t["name"], t["addr"],
-             t["entry"], price, round(net, 2), round(mx, 2), round(mn, 2), reason, round(mins, 1)])
+             t["entry"], price, round(t["size"], 2), round(net, 2), round(mx, 2),
+             round(mn, 2), reason, round(mins, 1)])
     send(f"{'✅' if net > 0 else '❌'} SANAL SATIS {t['name']} ({reason})\n"
-         f"Net getiri: {net:+.1f}% ({proceeds:.2f}$)\n"
+         f"Toplam net getiri: {net:+.1f}% ({t['proceeds']:.2f}$ / {t['size']:.2f}$)\n"
          f"Tepe: {mx:+.0f}% | Dip: {mn:+.0f}% | Sure: {mins:.0f} dk\n"
          f"Kasa: {STATE['cash']:.2f}$")
 
@@ -245,11 +249,28 @@ def exit_reason(t, price, attrs):
             t["liq_strikes"] = 0
         if t["liq_strikes"] >= 2:
             return "LIKIDITE_DUSTU"
-    if (1 - price / t["max"]) * 100 >= TRAIL_PCT:
+    if (price / t["entry"] - 1) * 100 <= -STOP_LOSS_PCT:
+        return "STOP_LOSS"
+    # Trailing sadece ilk kar alindiktan sonra (yoksa -%25 stop'tan once tetiklenirdi)
+    if t["tp_hit"] >= 1 and (1 - price / t["max"]) * 100 >= TRAIL_PCT:
         return "ZIRVEDEN_DUSUS"
     if tot >= MIN_TX_FOR_PRESSURE and sells / tot >= SELL_RATIO_EXIT:
         return "SATIS_BASKISI"
     return None
+
+
+def check_take_profit(pid, price):
+    """Fiyat birden fazla seviyeyi gectiyse hepsini sirayla isler."""
+    t = OPEN[pid]
+    while t["tp_hit"] < len(TP_LEVELS):
+        gain = (price / t["entry"] - 1) * 100
+        if gain < TP_LEVELS[t["tp_hit"]]:
+            break
+        t["tp_hit"] += 1
+        if t["tp_hit"] == len(TP_LEVELS):
+            close_trade(pid, price, f"TP{t['tp_hit']}_KALAN_SATILDI")
+            return
+        take_partial(pid, price, f"TP{t['tp_hit']} +%{TP_LEVELS[t['tp_hit'] - 1]:.0f}")
 
 
 def track_open(force=False):
@@ -277,6 +298,8 @@ def track_open(force=False):
                     close_trade(pid, price, reason)
                 elif force:
                     close_trade(pid, price, "OTURUM_BITTI")
+                else:
+                    check_take_profit(pid, price)
     for pid in [p for p, t in OPEN.items() if time.time() - t["seen"] > NO_DATA_MIN * 60]:
         close_trade(pid, 0, "VERI_YOK_SIFIR")
 
@@ -291,28 +314,13 @@ def scan_new():
             time.sleep(30)
             continue
         for p in pools:
-            if STATE["opened"] >= MAX_TRADES or len(OPEN) >= MAX_OPEN or STATE["cash"] < TRADE_USD:
+            if STATE["opened"] >= MAX_TRADES or len(OPEN) >= MAX_OPEN or STATE["cash"] < MIN_TRADE_USD:
                 break
             s = entry_ok(p)
             if not s:
                 continue
-            note = "kapali"
-            if USE_RUGCHECK:
-                ok, why = rugcheck(s["mint"])
-                time.sleep(RC_GAP)
-                if ok is None:                      # rapor henuz yok: sonra tekrar dene
-                    RC_TRIES[s["id"]] = RC_TRIES.get(s["id"], 0) + 1
-                    if RC_TRIES[s["id"]] >= RC_MAX_TRIES:
-                        SEEN.add(s["id"])
-                    continue
-                if not ok:
-                    SEEN.add(s["id"])
-                    STATE["rejected"] += 1
-                    print(f"RugCheck reddetti: {s['name']} ({why})", flush=True)
-                    continue
-                note = why
             SEEN.add(s["id"])
-            open_trade(s, note)
+            open_trade(s)
     return rl
 
 
@@ -323,8 +331,8 @@ def report(title="SANAL SNIPER RAPORU", elapsed=None):
     by = {}
     for r in RESULTS:
         by[r["reason"]] = by.get(r["reason"], 0) + 1
-    equity = STATE["cash"] + TRADE_USD * len(OPEN)   # acik pozisyonlar giris degerinden
-    pnl = equity - START_BALANCE
+    eq = equity()                      # acik pozisyonlar kalan giris maliyetinden
+    pnl = eq - START_BALANCE
     stat = ""
     if n:
         avg = sum(rets) / n
@@ -337,8 +345,8 @@ def report(title="SANAL SNIPER RAPORU", elapsed=None):
     fmt = lambda r: f"{r['name']}: {r['net']:+.0f}% ({r['reason']}, {r['mins']:.0f} dk)"
     send(
         f"📊 {title}" + (f" ({elapsed:.0f} dk)" if elapsed else "") + "\n"
-        f"Baslangic: {START_BALANCE:.2f}$ -> Su an: {equity:.2f}$ ({pnl:+.2f}$, {pnl / START_BALANCE * 100:+.1f}%)\n"
-        f"Islem: {n} (acik: {len(OPEN)}) | Kazanan: {wins} | Kaybeden: {n - wins} | RugCheck red: {STATE['rejected']}\n"
+        f"Baslangic: {START_BALANCE:.2f}$ -> Su an: {eq:.2f}$ ({pnl:+.2f}$, {pnl / START_BALANCE * 100:+.1f}%)\n"
+        f"Islem: {n} (acik: {len(OPEN)}) | Kazanan: {wins} | Kaybeden: {n - wins}\n"
         + stat
         + "Cikis nedenleri: " + (", ".join(f"{k}={v}" for k, v in by.items()) or "-") + "\n"
         + ("\nEn iyi 3: " + " | ".join(fmt(r) for r in best) if best else "")
@@ -351,8 +359,8 @@ def main():
     t_start = time.time()
     end = t_start + RUN_MINUTES * 60
     next_interim = t_start + INTERIM_MIN * 60
-    send(f"🚀 Sanal sniper v2 basladi: {START_BALANCE:.0f}$ kasa, islem basi {TRADE_USD:.0f}$, "
-         f"max {MAX_TRADES} islem, {RUN_MINUTES} dk, RugCheck: {'acik' if USE_RUGCHECK else 'kapali'}.")
+    send(f"🚀 Sanal sniper v3 basladi: {START_BALANCE:.0f}$ kasa, coin basina max %{MAX_POS_PCT:.0f}, "
+         f"stop -%{STOP_LOSS_PCT:.0f}, 3 parca kar alma, max {MAX_TRADES} islem, {RUN_MINUTES} dk.")
     backoff = 0
     while time.time() < end:
         t0 = time.time()
@@ -376,4 +384,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                                        
+    
