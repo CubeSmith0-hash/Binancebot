@@ -65,7 +65,9 @@ def telegram(text):
 def main():
     symbols = get_symbols()
     print(f"{len(symbols)} parite taranıyor")
-    while True:
+    max_min = float(os.environ.get("MAX_RUNTIME_MIN", "0"))  # 0 = sınırsız
+    end_time = time.time() + max_min * 60 if max_min else None
+    while end_time is None or time.time() < end_time:
         start = time.time()
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             for res in ex.map(check, symbols):
@@ -80,4 +82,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
+    
