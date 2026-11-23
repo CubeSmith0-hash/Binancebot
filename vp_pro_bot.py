@@ -26,12 +26,40 @@ WORKERS = 8
 sent = {}
 
 
+def non_crypto_symbols():
+    """Hisse / metal / emtia sembollerini bulur (Bitget v3 instruments: symbolType)."""
+    out = set()
+    try:
+        r = requests.get(f"{BASE}/api/v3/market/instruments",
+                         params={"category": PRODUCT}, timeout=15)
+        data = r.json().get("data") or []
+        if isinstance(data, dict):
+            data = data.get("list") or data.get("data") or []
+        for c in data:
+            if str(c.get("symbolType", "crypto")).lower() != "crypto":
+                out.add(c["symbol"])
+    except Exception as e:
+        print("v3 instruments hatası:", e)
+    return out
+
+
 def get_symbols():
     r = requests.get(f"{BASE}/api/v2/mix/market/contracts",
                      params={"productType": PRODUCT}, timeout=15)
     r.raise_for_status()
-    return [c["symbol"] for c in r.json()["data"]
-            if c.get("symbolStatus", "normal") == "normal"]
+    exclude = non_crypto_symbols()
+    syms = []
+    for c in r.json()["data"]:
+        if c.get("symbolStatus", "normal") != "normal":
+            continue
+        if c["symbol"] in exclude:
+            continue
+        if str(c.get("isRwa", "NO")).upper() == "YES":   # hisse/RWA işaretli semboller
+            continue
+        if str(c.get("symbolType", "crypto")).lower() != "crypto":
+            continue
+        syms.append(c["symbol"])
+    return syms
 
 
 def candles(symbol, limit):
@@ -198,4 +226,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-          
+    
