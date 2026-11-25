@@ -1,9 +1,9 @@
-name: orderflow-bot
+name: Orderflow Bot
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"   # yedek: zincir koparsa botu tekrar baslatir
+    - cron: "0 */6 * * *"   # zincir koparsa yedek baslatici
 
 concurrency:
   group: orderflow-bot
@@ -17,12 +17,14 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    env:
+      RUN_MINUTES: "340"
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Paketleri kur
         run: pip install aiohttp websockets
@@ -34,35 +36,33 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: state
-          key: bot-state-${{ github.run_id }}
-          restore-keys: bot-state-
+          key: orderflow-state-none
+          restore-keys: |
+            orderflow-state-
 
       - name: Botu calistir
-        id: bot
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
-          RUN_MINUTES: "340"
-          TOP_N: "30"
-          TF_MIN: "5"
-        run: python bitget_orderflow_bot.py
+          RUN_MINUTES: ${{ env.RUN_MINUTES }}
+        run: python -u bitget_orderflow_bot.py
 
       - name: Durumu kaydet
         if: always()
         uses: actions/cache/save@v4
         with:
           path: state
-          key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
+          key: orderflow-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Sonraki turu baslat
-        if: steps.bot.outcome == 'success'
+        if: always()
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ELAPSED=$(( $(date +%s) - START_TS ))
-          if [ "$ELAPSED" -gt 600 ]; then
-            gh workflow run orderflow.yml --repo ${{ github.repository }}
-          else
-            echo "Bot cok kisa surdu ($ELAPSED sn), zincir baslatilmadi."
+          MIN_OK=$(( RUN_MINUTES * 60 - 300 ))
+          if [ "$ELAPSED" -lt "$MIN_OK" ]; then
+            echo "Bot erken durdu (${ELAPSED} sn), zincir baslatilmadi."
             exit 1
           fi
+          gh workflow run "${{ github.workflow }}" --ref "${{ github.ref_name }}" -R "${{ github.repository }}"
