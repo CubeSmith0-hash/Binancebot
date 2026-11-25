@@ -1,10 +1,10 @@
 """Haber tabanli LONG/SHORT sinyal botu.
-Calistir:  python bot.py          (botu baslatir)
-           python bot.py --stats  (gecmis sinyallerin basari orani)
-Yatirim tavsiyesi degildir. Once sadece bildirim modunda test et.
+Calistir:  python bot.py                (surekli)
+           python bot.py --minutes 345  (N dakika calisip kapanir, GitHub Actions)
+           python bot.py --stats        (gecmis sinyallerin basari orani)
+Yatirim tavsiyesi degildir.
 """
 import os, sys, re, json, time, sqlite3, hashlib, logging
-from datetime import datetime, timezone
 
 import feedparser
 import requests
@@ -34,12 +34,10 @@ FEEDS = {
     "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml",
 }
 
-# Binance sembolleri (fiyat takibi icin). GOLD icin PAXG altin proxy'si.
 SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
            "XRP": "XRPUSDT", "GOLD": "PAXGUSDT"}
 ASSETS = ["BTC", "ETH", "SOL", "XRP", "GOLD", "OIL"]
 
-# API maliyetini dusurmek icin on filtre
 KEYWORDS = re.compile(
     r"trump|musk|bitcoin|btc|ethereum|ether\b|crypto|solana|xrp|sec\b|etf|"
     r"fed\b|powell|rate cut|rate hike|inflation|cpi|tariff|sanction|"
@@ -100,7 +98,6 @@ def send_telegram(text):
 
 
 def fetch_items():
-    """Tum kaynaklardan (kaynak, baslik, ozet, link) listesi dondurur."""
     items = []
     for name, url in FEEDS.items():
         try:
@@ -164,7 +161,6 @@ def process(con, first_run):
             if conf < MIN_CONF:
                 continue
             asset, direction = s["asset"], s["direction"]
-            # Cooldown: ayni varlik+yon icin tekrar sinyal verme
             last = con.execute(
                 "SELECT ts FROM signals WHERE asset=? AND direction=? ORDER BY ts DESC LIMIT 1",
                 (asset, direction)).fetchone()
@@ -188,7 +184,6 @@ def process(con, first_run):
 
 
 def update_outcomes(con):
-    """Sinyalden 15dk ve 60dk sonraki fiyati kaydeder (backtest icin)."""
     now = time.time()
     for col, secs in (("p15", 900), ("p60", 3600)):
         rows = con.execute(
@@ -222,8 +217,7 @@ def main():
     if "--stats" in sys.argv:
         return stats()
     if not ANTHROPIC_KEY:
-        sys.exit("ANTHROPIC_API_KEY eksik (.env dosyasini kontrol et)")
-    # --minutes N: N dakika calisip kapanir (GitHub Actions icin)
+        sys.exit("ANTHROPIC_API_KEY eksik (GitHub Secrets veya .env kontrol et)")
     deadline = None
     if "--minutes" in sys.argv:
         deadline = time.time() + float(sys.argv[sys.argv.index("--minutes") + 1]) * 60
