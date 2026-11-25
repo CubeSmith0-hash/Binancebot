@@ -1,0 +1,48 @@
+name: signal-bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: signal-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - uses: actions/cache@v4
+        with:
+          path: bot.db
+          key: bot-db-${{ github.run_id }}
+          restore-keys: bot-db-
+
+      - name: Botu calistir
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
+        run: python bot.py --minutes 345
+
+      - name: Sonraki calismayi tetikle
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bot.yml --repo ${{ github.repository }} --ref ${{ github.ref_name }}
