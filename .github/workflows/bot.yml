@@ -23,9 +23,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
-      - run: pip install -r requirements.txt
+      - name: Paketleri kur
+        run: pip install anthropic feedparser requests python-dotenv
 
       - uses: actions/cache@v4
         with:
@@ -42,7 +42,7 @@ jobs:
         run: python bot.py --minutes 345
 
       - name: Sonraki calismayi tetikle
-        if: always()
+        if: success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run bot.yml --repo ${{ github.repository }} --ref ${{ github.ref_name }}
