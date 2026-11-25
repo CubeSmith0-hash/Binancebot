@@ -27,6 +27,9 @@ jobs:
       - name: Paketleri kur
         run: pip install aiohttp websockets
 
+      - name: Baslangic zamani
+        run: echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Onceki durumu yukle
         uses: actions/cache/restore@v4
         with:
@@ -55,4 +58,11 @@ jobs:
         if: steps.bot.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run orderflow.yml --repo ${{ github.repository }}
+        run: |
+          ELAPSED=$(( $(date +%s) - START_TS ))
+          if [ "$ELAPSED" -gt 600 ]; then
+            gh workflow run orderflow.yml --repo ${{ github.repository }}
+          else
+            echo "Bot cok kisa surdu ($ELAPSED sn), zincir baslatilmadi."
+            exit 1
+          fi
