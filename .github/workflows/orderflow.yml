@@ -1,0 +1,58 @@
+name: orderflow-bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"   # yedek: zincir koparsa botu tekrar baslatir
+
+concurrency:
+  group: orderflow-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Onceki durumu yukle
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: bot-state-${{ github.run_id }}
+          restore-keys: bot-state-
+
+      - name: Botu calistir
+        id: bot
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          RUN_MINUTES: "340"
+          TOP_N: "30"
+          TF_MIN: "5"
+        run: python bitget_orderflow_bot.py
+
+      - name: Durumu kaydet
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Sonraki turu baslat
+        if: steps.bot.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run orderflow.yml --repo ${{ github.repository }}
