@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Paketleri kur
-        run: pip install anthropic feedparser requests python-dotenv
+        run: pip install feedparser requests python-dotenv
 
       - uses: actions/cache@v4
         with:
@@ -35,7 +35,6 @@ jobs:
 
       - name: Botu calistir
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CRYPTOPANIC_TOKEN: ${{ secrets.CRYPTOPANIC_TOKEN }}
