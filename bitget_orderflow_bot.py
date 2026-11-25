@@ -602,4 +602,11 @@ async def main():
             log("sure doldu, state kaydedilip cikiliyor")
     finally:
         save_state()
-        aw
+        await HTTP.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
