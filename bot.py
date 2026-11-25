@@ -1,23 +1,21 @@
-"""Haber tabanli LONG/SHORT sinyal botu.
+"""Haber tabanli LONG/SHORT sinyal botu (API anahtari gerektirmez).
 Calistir:  python bot.py                (surekli)
            python bot.py --minutes 345  (N dakika calisip kapanir, GitHub Actions)
            python bot.py --stats        (gecmis sinyallerin basari orani)
 Yatirim tavsiyesi degildir.
 """
-import os, sys, re, json, time, sqlite3, hashlib, logging
+import os, sys, re, time, sqlite3, hashlib, logging
+from collections import defaultdict
 
 import feedparser
 import requests
-from anthropic import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID")
 CP_TOKEN = os.getenv("CRYPTOPANIC_TOKEN", "")
-MODEL = os.getenv("MODEL", "claude-haiku-5-5")
-MIN_CONF = int(os.getenv("MIN_CONFIDENCE", "70"))
+MIN_CONF = int(os.getenv("MIN_CONFIDENCE", "65"))
 POLL = int(os.getenv("POLL_SECONDS", "60"))
 COOLDOWN = int(os.getenv("COOLDOWN_MIN", "30")) * 60
 DB_PATH = "bot.db"
@@ -36,31 +34,141 @@ FEEDS = {
 
 SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
            "XRP": "XRPUSDT", "GOLD": "PAXGUSDT"}
-ASSETS = ["BTC", "ETH", "SOL", "XRP", "GOLD", "OIL"]
-
-KEYWORDS = re.compile(
-    r"trump|musk|bitcoin|btc|ethereum|ether\b|crypto|solana|xrp|sec\b|etf|"
-    r"fed\b|powell|rate cut|rate hike|inflation|cpi|tariff|sanction|"
-    r"gold|oil|opec|war|strike|missile|attack|ceasefire|iran|israel|russia|"
-    r"ukraine|china|hack|exploit|binance|coinbase|blackrock|treasury", re.I)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("bot")
-client = Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
 
-SYSTEM = f"""Sen bir piyasa haber analistisin. Verilen haber basligi/ozetini oku ve
-bunun {', '.join(ASSETS)} varliklarindan hangisini kisa vadede (dakikalar-saatler) etkileyebilecegini degerlendir.
-Kurallar:
-- Sadece haber gercekten fiyat hareketi yaratabilecekse sinyal uret. Belirsiz/eski/onemsiz haberde bos liste don.
-- Yorum, analiz yazilari, fiyat tahmini haberleri ve zaten gerceklesmis buyuk hareketleri haberlestiren icerikler icin dusuk guven ver.
-- confidence 0-100 arasi tam sayi. Abartma.
-- reason: Turkce, tek cumle.
-SADECE su JSON'u dondur, baska hicbir sey yazma:
-{{"signals":[{{"asset":"BTC","direction":"LONG","confidence":75,"reason":"..."}}]}}
-direction sadece LONG veya SHORT olabilir."""
+# ======================= KURAL TABANLI ANALIZ =======================
+ASSET_RE = {
+    "BTC": re.compile(r"\b(bitcoin|btc)\b"),
+    "ETH": re.compile(r"\b(ethereum|ether|eth)\b"),
+    "SOL": re.compile(r"\b(solana|sol)\b"),
+    "XRP": re.compile(r"\b(xrp|ripple)\b"),
+    "GOLD": re.compile(r"\b(gold|bullion)\b"),
+    "OIL": re.compile(r"\b(oil|crude|brent|wti|opec)\b"),
+}
+GENERIC_CRYPTO = re.compile(r"\b(crypto|cryptocurrency|cryptocurrencies|digital assets?)\b")
+
+POS = {
+    "approve": 2, "approves": 2, "approved": 2, "approval": 2, "bullish": 2,
+    "adopt": 1.5, "adopts": 1.5, "adopted": 1.5, "adoption": 1, "buys": 1.5,
+    "bought": 1.5, "buy": 1, "accumulate": 1.5, "accumulates": 1.5,
+    "partnership": 1, "launches": 1, "launch": 1, "upgrade": 1.5,
+    "inflow": 1.5, "inflows": 1.5, "backs": 1.5, "wins": 1.5, "win": 1.5,
+    "positive": 1.5, "optimistic": 1.5, "praises": 1.5, "embraces": 1.5,
+    "invests": 1, "integrates": 1, "legalize": 2, "legalizes": 2, "legalized": 2,
+    "greenlights": 2, "supportive": 1.5, "favorable": 1.5, "boost": 1,
+}
+NEG = {
+    "ban": -2.5, "bans": -2.5, "banned": -2.5, "crackdown": -2.5,
+    "lawsuit": -2, "sues": -2, "sued": -2, "hack": -2.5, "hacked": -2.5,
+    "hacker": -2, "exploit": -2, "exploited": -2, "stolen": -2, "theft": -2,
+    "fraud": -2.5, "scam": -2, "bearish": -2, "selloff": -2, "dump": -2,
+    "dumps": -2, "outflow": -1.5, "outflows": -1.5, "reject": -2,
+    "rejects": -2, "rejected": -2, "denies": -1.5, "delay": -1.5,
+    "delays": -1.5, "delayed": -1.5, "warns": -1.5, "warning": -1.5,
+    "crash": -2, "collapse": -2.5, "collapses": -2.5, "bankrupt": -3,
+    "bankruptcy": -3, "insolvent": -3, "investigation": -1.5, "probe": -1.5,
+    "charged": -1.5, "indicted": -2.5, "criticizes": -1.5, "slams": -1.5,
+    "negative": -1.5, "fear": -1, "fears": -1, "threatens": -1.5,
+    "restrict": -1.5, "restricts": -1.5, "restrictions": -1.5, "liquidated": -1.5,
+    "liquidations": -1.5, "shutdown": -2, "freezes": -2, "seizes": -2,
+}
+LEXICON = {**POS, **NEG}
+PHRASES = {
+    "all-time high": 2, "record high": 2, "bitcoin reserve": 2.5,
+    "strategic reserve": 2, "legal tender": 2, "etf approval": 2,
+    "drops charges": 2, "dropped charges": 2, "sell-off": -2, "sell off": -2,
+    "shut down": -2, "all-time low": -2, "record low": -2,
+}
+NEGATORS = {"not", "no", "never", "without", "unlikely", "fails", "fail"}
+
+# Makro olaylar: (regex, {varlik: etki}, etiket)
+MACRO = [
+    (re.compile(r"\b(war|airstrike|airstrikes|missile|missiles|invasion|invades|bombing|escalat\w+)\b"),
+     {"GOLD": 2, "OIL": 2, "BTC": -1, "ETH": -1}, "savas/gerilim"),
+    (re.compile(r"ceasefire|peace deal|truce|de-escalat"),
+     {"GOLD": -1.5, "OIL": -2, "BTC": 1, "ETH": 1}, "ates kes/baris"),
+    (re.compile(r"rate cuts?|cuts? (interest )?rates|dovish"),
+     {"BTC": 2, "ETH": 2, "GOLD": 2}, "faiz indirimi"),
+    (re.compile(r"rate hikes?|raises? (interest )?rates|hawkish|higher for longer"),
+     {"BTC": -2, "ETH": -2, "GOLD": -1.5}, "faiz artisi"),
+    (re.compile(r"inflation (rises|jumps|surges|heats)|hotter[- ]than[- ]expected"),
+     {"BTC": -1.5, "ETH": -1.5}, "yuksek enflasyon"),
+    (re.compile(r"inflation (falls|cools|eases|slows)|cooler[- ]than[- ]expected"),
+     {"BTC": 1.5, "ETH": 1.5, "GOLD": 1}, "dusen enflasyon"),
+    (re.compile(r"tariff pause|tariff relief|tariffs? (delay|delayed|cut|cuts|lifted)|trade deal"),
+     {"BTC": 1.5, "ETH": 1.5, "OIL": 1}, "ticaret gerginligi azaldi"),
+    (re.compile(r"tariffs?|trade war"),
+     {"BTC": -1.5, "ETH": -1.5, "GOLD": 1, "OIL": -1}, "gumruk vergisi"),
+    (re.compile(r"opec\+? (cuts?|reduces?|slashes)"), {"OIL": 2.5}, "OPEC uretim kesintisi"),
+    (re.compile(r"opec\+? (raises?|increases?|boosts?)"), {"OIL": -2.5}, "OPEC uretim artisi"),
+]
+ACTORS = re.compile(r"trump|musk|powell|\bfed\b|\bsec\b|blackrock|binance|coinbase|"
+                    r"saylor|white house|treasury|opec|putin|xi jinping")
+HEDGE = re.compile(r"\b(could|may|might|would|should|analysts?|predict\w*|forecast\w*|"
+                   r"expects?|opinion|analysis|why|how|what)\b|\?")
+MOVED = re.compile(r"\b(surges?|soars?|plunges?|tumbles?|jumps?|rallies|rally|slides?|"
+                   r"drops?|falls?|sinks?|slumps?|skyrockets?)\b")
 
 
-# ---------- Veritabani ----------
+def sentiment(text):
+    low = text.lower().replace("\u2019", "'")
+    score, terms = 0.0, []
+    for ph, w in PHRASES.items():
+        if ph in low:
+            score += w
+            terms.append(ph)
+    tokens = re.findall(r"[a-z][a-z\-']*", low)
+    for i, t in enumerate(tokens):
+        w = LEXICON.get(t)
+        if w is None:
+            continue
+        if any(x in NEGATORS or x.endswith("n't") for x in tokens[max(0, i - 3):i]):
+            w = -0.8 * w
+        score += w
+        terms.append(t)
+    return score, terms
+
+
+def analyze(title, summary=""):
+    t = title.lower()
+    s_title, terms_t = sentiment(title)
+    s_sum, _ = sentiment(summary)
+    total = s_title + 0.4 * s_sum
+    scores, why = defaultdict(float), defaultdict(list)
+
+    for asset, rx in ASSET_RE.items():
+        if rx.search(t) and total:
+            scores[asset] += total
+            why[asset] += terms_t
+    if GENERIC_CRYPTO.search(t) and total:
+        for a in ("BTC", "ETH"):
+            if not ASSET_RE[a].search(t):
+                scores[a] += 0.7 * total
+                why[a] += terms_t
+    for rx, effects, label in MACRO:
+        if rx.search(t):
+            for a, w in effects.items():
+                scores[a] += w
+                why[a].append(label)
+
+    bonus = 10 if ACTORS.search(t) else 0
+    penalty = (15 if HEDGE.search(t) else 0) + (10 if MOVED.search(t) else 0)
+    out = []
+    for asset, sc in scores.items():
+        if abs(sc) < 1.5:
+            continue
+        conf = int(min(92, 40 + 13 * min(abs(sc), 3.5) + bonus - penalty))
+        uniq = list(dict.fromkeys(why[asset]))[:3]
+        out.append({"asset": asset, "direction": "LONG" if sc > 0 else "SHORT",
+                    "confidence": conf,
+                    "reason": ("Olumlu" if sc > 0 else "Olumsuz") + " haber: " + ", ".join(uniq)})
+    out.sort(key=lambda x: -x["confidence"])
+    return out[:2]
+# ====================================================================
+
+
 def db():
     con = sqlite3.connect(DB_PATH)
     con.execute("CREATE TABLE IF NOT EXISTS seen(uid TEXT PRIMARY KEY)")
@@ -71,7 +179,6 @@ def db():
     return con
 
 
-# ---------- Yardimcilar ----------
 def get_price(asset):
     sym = SYMBOLS.get(asset)
     if not sym:
@@ -114,34 +221,12 @@ def fetch_items():
                              params={"auth_token": CP_TOKEN, "public": "true",
                                      "filter": "important"}, timeout=10).json()
             for p in r.get("results", []):
-                items.append(("CryptoPanic", p.get("title", ""), "",
-                              p.get("url", "")))
+                items.append(("CryptoPanic", p.get("title", ""), "", p.get("url", "")))
         except Exception as ex:
             log.warning("CryptoPanic hatasi: %s", ex)
     return items
 
 
-def analyze(title, summary):
-    if not client:
-        return []
-    try:
-        msg = client.messages.create(
-            model=MODEL, max_tokens=400, system=SYSTEM,
-            messages=[{"role": "user", "content": f"Baslik: {title}\nOzet: {summary}"}])
-        text = "".join(b.text for b in msg.content if b.type == "text")
-        m = re.search(r"\{.*\}", text, re.S)
-        data = json.loads(m.group(0)) if m else {}
-        out = []
-        for s in data.get("signals", []):
-            if s.get("asset") in ASSETS and s.get("direction") in ("LONG", "SHORT"):
-                out.append(s)
-        return out
-    except Exception as e:
-        log.warning("Analiz hatasi: %s", e)
-        return []
-
-
-# ---------- Ana mantik ----------
 def process(con, first_run):
     new_items = []
     for src, title, summ, link in fetch_items():
@@ -154,13 +239,10 @@ def process(con, first_run):
     con.commit()
 
     for src, title, summ, link in new_items:
-        if not KEYWORDS.search(title + " " + summ):
-            continue
         for s in analyze(title, summ):
-            conf = int(s.get("confidence", 0))
+            conf, asset, direction = s["confidence"], s["asset"], s["direction"]
             if conf < MIN_CONF:
                 continue
-            asset, direction = s["asset"], s["direction"]
             last = con.execute(
                 "SELECT ts FROM signals WHERE asset=? AND direction=? ORDER BY ts DESC LIMIT 1",
                 (asset, direction)).fetchone()
@@ -170,14 +252,13 @@ def process(con, first_run):
             con.execute(
                 "INSERT INTO signals(ts,asset,direction,confidence,reason,title,source,link,entry) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",
-                (time.time(), asset, direction, conf, s.get("reason", ""),
-                 title, src, link, entry))
+                (time.time(), asset, direction, conf, s["reason"], title, src, link, entry))
             con.commit()
             emoji = "🟢" if direction == "LONG" else "🔴"
             price_txt = f"\nGiris fiyati: {entry:,.2f}" if entry else ""
             send_telegram(
                 f"{emoji} {asset} {direction} | Guven: %{conf}\n"
-                f"Sebep: {s.get('reason','')}\n"
+                f"Sebep: {s['reason']}\n"
                 f"Haber: {title}\nKaynak: {src}{price_txt}\n{link}\n"
                 f"⚠️ Yatirim tavsiyesi degildir.")
             log.info("SINYAL %s %s %%%s - %s", asset, direction, conf, title)
@@ -216,8 +297,6 @@ def stats():
 def main():
     if "--stats" in sys.argv:
         return stats()
-    if not ANTHROPIC_KEY:
-        sys.exit("ANTHROPIC_API_KEY eksik (GitHub Secrets veya .env kontrol et)")
     deadline = None
     if "--minutes" in sys.argv:
         deadline = time.time() + float(sys.argv[sys.argv.index("--minutes") + 1]) * 60
@@ -241,4 +320,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-                         
