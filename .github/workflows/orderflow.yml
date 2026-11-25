@@ -40,6 +40,16 @@ jobs:
           restore-keys: |
             orderflow-state-
 
+      - name: Dosyayi dogrula
+        run: |
+          wc -l bitget_orderflow_bot.py
+          tail -n 8 bitget_orderflow_bot.py
+          python -m py_compile bitget_orderflow_bot.py
+          if ! grep -q "asyncio.run(main())" bitget_orderflow_bot.py || ! grep -q "HTTP.close()" bitget_orderflow_bot.py; then
+            echo "HATA: bitget_orderflow_bot.py kesik, dosyanin sonu eksik."
+            exit 1
+          fi
+
       - name: Botu calistir
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
